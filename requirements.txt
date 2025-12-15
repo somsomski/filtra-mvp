@@ -1,3 +1,7 @@
 streamlit
 supabase
 pandas
+fastapi
+uvicorn
+requests
+pydantic
