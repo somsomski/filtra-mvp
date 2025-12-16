@@ -49,50 +49,36 @@ def log_to_db(phone: str, action_type: str, content: str):
 # --- Helper Functions ---
 def sanitize_argentina_number(phone_number: str) -> str:
     """
-    Sanitizes Argentina Text/Sandbox numbers to Meta API format.
-    Input format expected: 5411... or 54911...
-    Target format: 549 + Area Code + Number (without 15 prefix).
+    Sanitizes Argentina Text/Sandbox numbers to the LOCAL format required by this specific Meta account.
+    Target format: 54 + AreaCode (11) + 15 + Number.
+    Standard International (54911...) FAILS.
+    
+    Logic:
+    1. Remove '9' after '54'.
+    2. Insert '15' after '11' if missing.
     """
-    # 0. Clean basic junk just in case (though usually clean from Meta)
+    # 0. Clean basic junk
     phone = phone_number.strip().replace("+", "").replace(" ", "")
 
-    # 1. Check if Argentina
+    # 1. Check if Argentina (54)
     if phone.startswith("54"):
-        # 2. Check for '9' after '54'. If missing, insert it.
-        # e.g. 5411... -> 54911...
-        if len(phone) > 2 and phone[2] != '9':
-            phone = "549" + phone[2:]
+        # 2. REMOVE '9' if present (International Mobile Token)
+        # e.g. 54911... -> 5411...
+        if len(phone) > 2 and phone[2] == '9':
+            phone = "54" + phone[3:]
         
-        # Now phone starts with 549...
+        # Now phone is likely 5411... (assuming BA)
         
-        # 3. Check for '15' removal.
-        # '15' is the mobile prefix usually found after area code when dialing locally.
-        # But in international format (549...), it should NOT exist.
-        # Meta Sandbox/User inputs might carry it.
-        # Example structure: 54 9 [AreaCode] [15?] [Number]
-        # Area codes: 
-        #   11 (BA) -> index 3,4. Next is 5.
-        #   2xx/3xx -> index 3,4,5. Next is 6.
-        #   2xxx -> index 3,4,5,6. Next is 7.
-        
-        # Heuristic: If we find "15" at likely positions (index 5, 6, or 7), remove it.
-        # CAUTION: '15' could be part of the actual number.
-        # SAFE BET: Only fix known big cases or just the logic requested "If after area code is 15".
-        # Given "Example: 541115... -> 54911...", let's handle the specific 11 case safely,
-        # and maybe a generic "sequence 15" removal if length suggests it's extra?
-        # A standard mobile number in Arg including area code is 10 digits (without 54 9).
-        # e.g. 11 1234 5678 (10 digits).
-        # Total Length of 54 9 XX XXXX XXXX = 13 digits.
-        # If we have 15 digits (extra 15), we remove it?
-        
-        # Let's try matching the 5491115 pattern explicitly first (Buenos Aires)
-        if phone.startswith("5491115") and len(phone) > 11:
-            # Remove the '15' at index 5,6
-            phone = phone[:5] + phone[7:]
-        
-        # TODO: Add other area codes if strictly needed, but 11 is 40% of country.
-        # For now we stick to the requested logic examples.
-
+        # 3. ADD '15' (Local Mobile Prefix) for Buenos Aires (11)
+        # We need the result to be 54 11 15 xxxxxxxx
+        if phone.startswith("5411"):
+            # Check if '15' is already there
+            # 5411 says length 4. 
+            # If next chars are 15, we leave it.
+            if not phone.startswith("541115"):
+                # Insert 15
+                phone = "541115" + phone[4:]
+                
     return phone
 
 def send_whatsapp_message(to_number: str, text: str):
