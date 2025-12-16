@@ -21,6 +21,15 @@ VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- Helper Function ---
+def fix_argentina_number(phone_number: str) -> str:
+    """
+    Fixes Argentina number format for Meta Sandbox.
+    Replaces 54911 with 541115 if applicable.
+    """
+    if phone_number.startswith("54911"):
+        return phone_number.replace("54911", "541115", 1)
+    return phone_number
+
 def send_whatsapp_message(to_number: str, text: str):
     """
     Sends a text message via WhatsApp Cloud API.
@@ -145,10 +154,12 @@ async def webhook(payload: MetaWebhookPayload):
                         reply_text = f"No encontré vehículos que coincidan con '{user_query}'."
 
                     # Send Reply
-                    send_whatsapp_message(chat_id, reply_text)
+                    target_number = fix_argentina_number(chat_id)
+                    send_whatsapp_message(target_number, reply_text)
 
                 except Exception as e:
                     print(f"Error processing search: {e}")
-                    send_whatsapp_message(chat_id, "Lo siento, hubo un error procesando tu búsqueda.")
+                    target_number = fix_argentina_number(chat_id)
+                    send_whatsapp_message(target_number, "Lo siento, hubo un error procesando tu búsqueda.")
 
     return {"status": "ok"}
