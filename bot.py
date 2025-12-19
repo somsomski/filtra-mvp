@@ -222,19 +222,22 @@ async def webhook(payload: MetaWebhookPayload):
                 log_to_db(chat_id, 'search_text', text_body)
 
                 # 1. Check Keywords
-                if text_body.lower() in ['hola', 'start', 'menu', 'inicio', 'hi']:
+                stop_words = ['hola', 'start', 'hi', 'hello', 'privet', 'menu', 'test']
+                if text_body.lower() in stop_words:
                     welcome_text = (
-                        "👋 **Hola! Soy FiltraBot (Beta).**\n"
-                        "Herramienta gratuita para buscar filtros en Argentina. 🇦🇷\n\n"
-                        "⚠️ *Nuestra base de datos crece todos los días.*\n\n"
-                        "👇 **Escribí el modelo de tu auto (ej: Gol Trend):**"
+                        "👋 **Hola! Soy FiltraBot.**\n"
+                        "Tu buscador de filtros al instante. 🇦🇷\n\n"
+                        "🚀 *Estamos en Beta: agregamos autos nuevos cada día.*\n\n"
+                        "👇 **Escribí el modelo de tu auto:**\n"
+                        "(ej: Gol Trend 1.6)"
                     )
                     send_whatsapp_message(chat_id, welcome_text)
                 
                 else:
                     # 2. Search Database
                     try:
-                        res = supabase.table("vehicle").select("vehicle_id, brand_car, model, year_from, year_to, engine_disp_l, power_hp")\
+                        # Updated columns
+                        res = supabase.table("vehicle").select("vehicle_id, brand_car, model, series_suffix, body_type, fuel_type, year_from, year_to, engine_disp_l, power_hp, engine_valves")\
                             .or_(f"brand_car.ilike.%{text_body}%,model.ilike.%{text_body}%")\
                             .limit(12).execute()
                         
@@ -253,13 +256,41 @@ async def webhook(payload: MetaWebhookPayload):
                             # 1-10 Results -> Interactive List
                             list_rows = []
                             for v in vehicles:
-                                title = f"{v['brand_car']} {v['model']}"[:24]
+                                # Title: {engine_disp_l}L {power_hp}CV {engine_valves} {fuel_type}
+                                parts_title = []
+                                if v.get('engine_disp_l'):
+                                    parts_title.append(f"{v['engine_disp_l']}L")
+                                if v.get('power_hp'):
+                                    parts_title.append(f"{v['power_hp']}CV")
+                                if v.get('engine_valves'):
+                                    parts_title.append(str(v['engine_valves']))
+                                if v.get('fuel_type') == 'Diesel':
+                                    parts_title.append("Diesel")
+                                
+                                title_str = " ".join(parts_title)
+                                if not title_str:
+                                    title_str = "Motor Desconocido" # Fallback
+                                
+                                # Description: {brand_car} {model} {series_suffix} {body_type} • {year_from}-{year_to}
+                                desc_parts = [
+                                    v.get('brand_car', ''),
+                                    v.get('model', ''),
+                                    v.get('series_suffix') or '',
+                                    v.get('body_type') or ''
+                                ]
+                                # Clean empty strings
+                                desc_parts = [s for s in desc_parts if s]
+                                main_desc = " ".join(desc_parts)
+                                
                                 y_to = str(v['year_to']) if v['year_to'] else 'Pres'
-                                desc = f"{v['year_from']}-{y_to} {v['engine_disp_l'] or ''}L {v.get('power_hp') or ''}HP"
+                                years = f"• {v['year_from']}-{y_to}"
+                                
+                                full_desc = f"{main_desc} {years}"
+                                
                                 list_rows.append({
                                     "id": str(v['vehicle_id']),
-                                    "title": title,
-                                    "description": desc[:72]
+                                    "title": title_str[:24],
+                                    "description": full_desc[:72]
                                 })
                             
                             send_interactive_list(
@@ -278,39 +309,80 @@ async def webhook(payload: MetaWebhookPayload):
             elif msg_type == 'interactive' and msg['interactive']['type'] == 'list_reply':
                 selection = msg['interactive']['list_reply']
                 vehicle_id = selection['id']
-                vehicle_title = selection['title']
                 
-                log_to_db(chat_id, 'select_vehicle', f"{vehicle_id} - {vehicle_title}")
+                log_to_db(chat_id, 'select_vehicle', vehicle_id)
 
                 try:
+                    # 1. Fetch Vehicle Details for Title/Footer
+                    v_res = supabase.table("vehicle")\
+                        .select("brand_car, model, series_suffix, engine_code, engine_series")\
+                        .eq("vehicle_id", vehicle_id)\
+                        .single().execute()
+                    
+                    vehicle = v_res.data
+                    if not vehicle:
+                         send_whatsapp_message(chat_id, "Error: Vehículo no encontrado.")
+                         continue
+
+                    # Construct Title
+                    title_parts = [vehicle.get('brand_car'), vehicle.get('model'), vehicle.get('series_suffix')]
+                    display_title = " ".join([p for p in title_parts if p])
+                    
+                    # 2. Fetch Parts
                     parts_res = supabase.table("vehicle_part")\
                         .select("role, part(brand_filter, part_code, part_type, notes)")\
                         .eq("vehicle_id", vehicle_id)\
                         .execute()
                     
                     # Process Parts
-                    type_icons = {'oil': '🛢', 'air': '💨', 'fuel': '⛽', 'cabin': '❄️'}
+                    # Localization map
+                    type_map = {
+                        'oil': 'Aceite', 
+                        'air': 'Aire', 
+                        'cabin': 'Habitáculo', 
+                        'fuel': 'Combustible'
+                    }
+                    icon_map = {'oil': '🛢️', 'air': '💨', 'cabin': '❄️', 'fuel': '⛽'}
+                    
                     found_parts = {}
                     
                     for item in parts_res.data:
                         part_data = item.get('part')
                         if part_data:
                             ptype = part_data.get('part_type', 'other').lower()
-                            pstr = f"{part_data.get('brand_filter')} {part_data.get('part_code')}"
+                            # Format: • **BRAND:** PartNumber
+                            brand = part_data.get('brand_filter', 'Gene.')
+                            code = part_data.get('part_code', '?')
+                            pstr = f"• **{brand}:** {code}"
+                            
                             if ptype not in found_parts:
                                 found_parts[ptype] = []
                             found_parts[ptype].append(pstr)
                     
-                    msg_body = f"🚗 **{vehicle_title}**\n\n"
+                    msg_body = f"🚗 **{display_title}**\n\n"
                     
-                    for k in ['oil', 'air', 'fuel', 'cabin']:
+                    # Order: Aceite, Aire, Habitáculo, Combustible
+                    order = ['oil', 'air', 'cabin', 'fuel']
+                    
+                    for k in order:
                         if k in found_parts:
-                            icon = type_icons.get(k, '🔧')
-                            filters_str = ", ".join(found_parts[k])
-                            msg_body += f"{icon} {k.capitalize()}: {filters_str}\n"
+                            label = type_map.get(k, k.capitalize())
+                            icon = icon_map.get(k, '🔧')
+                            
+                            msg_body += f"{icon} **{label}**\n"
+                            for line in found_parts[k]:
+                                msg_body += f"{line}\n"
+                            msg_body += "\n" # Spacing
                     
                     if not found_parts:
                         msg_body += "⚠️ No tenemos filtros cargados para este auto aún.\n"
+                    
+                    # Footer
+                    eng_code = vehicle.get('engine_code')
+                    eng_series = vehicle.get('engine_series')
+                    if eng_code or eng_series:
+                        code_str = f"{eng_code or ''} {eng_series or ''}".strip()
+                        msg_body += f"🔧 Motor: {code_str}"
 
                     buttons = [
                         {"id": "btn_buy", "title": "📍 Dónde comprar?"},
