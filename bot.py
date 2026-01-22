@@ -189,6 +189,9 @@ async def webhook(payload: MetaWebhookPayload):
                     text_body = msg['text']['body'].strip()
                     log_to_db(chat_id, 'search_text', text_body)
                     
+                    # Silent Mirroring to Telegram
+                    await telegram_crm.send_log_to_admin(chat_id, f"🔍 Buscó: {text_body}", is_alert=False)
+                    
                     # Check "Hola" logic or Stop Words if desired, but "Search Logic" is main focus
                     stop_words = ['hola', 'start', 'hi', 'hello', 'menú', 'menu']
                     if text_body.lower() in stop_words:
