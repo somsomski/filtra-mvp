@@ -59,8 +59,41 @@ def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict
             "raw_message": payload if payload else None
         }
         supabase.table("logs").insert(data).execute()
+
+# --- Unified Response Wrapper ---
+async def reply_and_mirror(phone: str, text: str, buttons: list = None, list_rows: list = None, list_title: str = None):
+    """
+    Sends to WhatsApp AND mirrors the exact content to Telegram.
+    """
+    try:
+        # 1. Send to WhatsApp via services
+        if buttons:
+            send_interactive_buttons(phone, text, buttons)
+        elif list_rows:
+            send_interactive_list(phone, text, "Ver Opciones", list_title or "Resultados", list_rows)
+        else:
+            send_whatsapp_message(phone, text)
     except Exception as e:
-        print(f"[Analytics Error] {e}")
+        print(f"WhatsApp Send Error: {e}")
+
+    # 2. Construct Mirror Text for Telegram
+    try:
+        # Use the EXACT 'text' variable passed above
+        mirror_msg = f"🤖 Bot: {text}"
+        
+        # Append visual cues for interactive elements
+        if buttons:
+            btn_titles = " | ".join([f"[{b['title']}]" for b in buttons])
+            mirror_msg += f"\n🔘 *Opciones:* {btn_titles}"
+        
+        if list_rows:
+            mirror_msg += f"\n📋 *Mostró Lista:* {len(list_rows)} ítems"
+
+        # 3. Send to Telegram
+        await telegram_crm.send_log_to_admin(phone, mirror_msg, is_alert=False)
+    except Exception as e:
+        print(f"Telegram Mirror Error: {e}")
+
 
 # --- Pydantic Models ---
 class MetaWebhookPayload(BaseModel):
@@ -156,7 +189,7 @@ async def webhook(payload: MetaWebhookPayload):
                         if msg['interactive']['button_reply']['id'] == 'cmd_return_bot':
                             # SWITCH TO BOT
                             supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
-                            send_whatsapp_message(chat_id, "🤖 Bot reactivado. ¿En qué te ayudo?")
+                            await reply_and_mirror(chat_id, "🤖 Bot reactivado. ¿En qué te ayudo?")
                             await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot.", is_alert=False)
                             continue
                 
@@ -165,7 +198,7 @@ async def webhook(payload: MetaWebhookPayload):
                 if text_body and text_body.lower().strip() in keywords:
                     # Switch back to bot
                     supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
-                    send_whatsapp_message(chat_id, "🤖 Bot reactivado.")
+                    await reply_and_mirror(chat_id, "🤖 Bot reactivado.")
                     await telegram_crm.send_log_to_admin(chat_id, f"🔄 User detected keyword '{text_body}'. Bot Active.", is_alert=False)
                     # Proceed to bot logic below? 
                     # Prompt says: "If matches keywords like 'Menu' or 'Start'" -> Switch?
@@ -201,8 +234,7 @@ async def webhook(payload: MetaWebhookPayload):
                             "👇 **Escribí el modelo de tu auto:**\n"
                             "(ej: Gol Trend 1.6)"
                         )
-                        send_whatsapp_message(chat_id, welcome_text)
-                        await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot: {welcome_text[:100]}...", is_alert=False)
+                        await reply_and_mirror(chat_id, welcome_text)
                     else:
                         # Search DB
                         try:
@@ -219,13 +251,11 @@ async def webhook(payload: MetaWebhookPayload):
                                     {"id": "btn_human_help", "title": "✅ Sí, pedir ayuda"},
                                     {"id": "btn_search_error", "title": "🔙 No, error mio"}
                                 ]
-                                send_interactive_buttons(chat_id, reply, buttons)
-                                await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot: No encontró resultados para '{text_body}'.", is_alert=False)
+                                await reply_and_mirror(chat_id, reply, buttons=buttons)
                             
                             # >10 Results
                             elif len(vehicles) > 10:
-                                send_whatsapp_message(chat_id, f"🖐 Encontré demasiados ({len(vehicles)}+). Sé más específico (ej: agregar motor o año).")
-                                await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot: Encontró demasiados ({len(vehicles)}+). Pidió especificidad.", is_alert=False)
+                                await reply_and_mirror(chat_id, f"🖐 Encontré demasiados ({len(vehicles)}+). Sé más específico (ej: agregar motor o año).")
 
                             # 1-10 Results
                             else:
@@ -255,14 +285,12 @@ async def webhook(payload: MetaWebhookPayload):
                                         "description": full_desc[:72]
                                     })
                                 
-                                send_interactive_list(
+                                await reply_and_mirror(
                                     chat_id,
                                     "Seleccioná tu versión exacta:",
-                                    "Ver Modelos",
-                                    "Resultados",
-                                    list_rows
+                                    list_rows=list_rows,
+                                    list_title="Resultados"
                                 )
-                                await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot: Mostró lista de {len(list_rows)} vehículos.", is_alert=False)
 
                         except Exception as e:
                             print(f"Search Error: {e}")
@@ -313,8 +341,7 @@ async def webhook(payload: MetaWebhookPayload):
                         # Using search_error as 'search other' roughly, or just simple text instructions?
                         # Requirement: "🔍 Buscar otro"
                     ]
-                    send_interactive_buttons(chat_id, msg_body, buttons)
-                    await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot:\n{msg_body}", is_alert=False)
+                    await reply_and_mirror(chat_id, msg_body, buttons=buttons)
 
                 # C. Button Handlers
                 elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
@@ -327,12 +354,11 @@ async def webhook(payload: MetaWebhookPayload):
                         # Set human, alert admin
                         supabase.table("users").update({"status": "human"}).eq("phone", chat_id).execute()
                         await telegram_crm.send_log_to_admin(chat_id, "🚨 **Help Request**: User requested assistance.", is_alert=True)
-                        send_whatsapp_message(chat_id, "✅ Ticket creado. Te contestaré en breve.")
+                        await reply_and_mirror(chat_id, "✅ Ticket creado. Te contestaré en breve.")
                     
                     # 2. Search Error / Back
                     elif btn_id == 'btn_search_error':
-                        send_whatsapp_message(chat_id, "👍 Dale, probá escribiendo de otra forma.")
-                        await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Pidió reintentar búsqueda.", is_alert=False)
+                        await reply_and_mirror(chat_id, "👍 Dale, probá escribiendo de otra forma.")
 
                     # 3. Dónde comprar
                     elif btn_id == 'btn_buy_loc':
@@ -346,8 +372,7 @@ async def webhook(payload: MetaWebhookPayload):
                         # I can add a specific status: 'waiting_location'.
                         
                         supabase.table("users").update({"status": "waiting_location"}).eq("phone", chat_id).execute()
-                        send_whatsapp_message(chat_id, "📍 ¿De qué Barrio o Ciudad sos?")
-                        await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Preguntó ¿De qué barrio sos?", is_alert=False)
+                        await reply_and_mirror(chat_id, "📍 ¿De qué Barrio o Ciudad sos?")
                     
                     # 4. Menú / Taller
                     elif btn_id == 'btn_menu_mech':
@@ -357,32 +382,29 @@ async def webhook(payload: MetaWebhookPayload):
                             {"id": "btn_is_seller", "title": "🏪 Soy Vendedor"},
                             {"id": "btn_report_err", "title": "📝 Reportar error"}
                         ]
-                        send_interactive_buttons(chat_id, reply, sub_btns)
-                        await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Mostró opciones de Taller/Vendedor.", is_alert=False)
+                        await reply_and_mirror(chat_id, reply, buttons=sub_btns)
 
                     # 5. Handler 🔧 Soy Mecánico
                     elif btn_id == 'btn_is_mechanic':
                         reply = "Ofrecemos catálogos PRO para talleres. ¿Te anoto en la lista?"
                         # Button [✅ Sí, quiero PRO]
                         # API limits 3 buttons.
-                        send_interactive_buttons(chat_id, reply, [{"id": "btn_mech_confirm", "title": "✅ Sí, quiero PRO"}])
+                        await reply_and_mirror(chat_id, reply, buttons=[{"id": "btn_mech_confirm", "title": "✅ Sí, quiero PRO"}])
 
                     elif btn_id == 'btn_mech_confirm':
                         supabase.table("users").update({"user_type": "mechanic"}).eq("phone", chat_id).execute()
                         await telegram_crm.send_log_to_admin(chat_id, "👨‍🔧 **User is Mechanic** (Requested PRO)", is_alert=True)
-                        send_whatsapp_message(chat_id, "¡Anotado! Te contactaremos.")
-                        await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Confirmó registro.", is_alert=False)
+                        await reply_and_mirror(chat_id, "¡Anotado! Te contactaremos.")
 
                     # 6. Handler 🏪 Soy Vendedor
                     elif btn_id == 'btn_is_seller':
                         reply = "¿Quieres recibir clientes de tu zona?"
-                        send_interactive_buttons(chat_id, reply, [{"id": "btn_seller_confirm", "title": "👋 Contactar"}])
+                        await reply_and_mirror(chat_id, reply, buttons=[{"id": "btn_seller_confirm", "title": "👋 Contactar"}])
 
                     elif btn_id == 'btn_seller_confirm':
                         supabase.table("users").update({"user_type": "seller"}).eq("phone", chat_id).execute()
                         await telegram_crm.send_log_to_admin(chat_id, "🏪 **User is Seller** (Wants Leads)", is_alert=True)
-                        send_whatsapp_message(chat_id, "¡Genial! Hablamos pronto.")
-                        await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Confirmó registro.", is_alert=False)
+                        await reply_and_mirror(chat_id, "¡Genial! Hablamos pronto.")
 
             # --- SPECIAL STATUS: Waiting Location ---
             elif status == 'waiting_location':
@@ -393,11 +415,9 @@ async def webhook(payload: MetaWebhookPayload):
                     
                     msg = f"Gracias. Te avisaremos cuando agreguemos tiendas en {location}."
                     # [Buscar otro] button is requested but can be just text instruction or button if possible.
-                    # Send button message?
-                    send_interactive_buttons(chat_id, msg, [{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
-                    
                     # Log
                     await telegram_crm.send_log_to_admin(chat_id, f"📍 Lead Location: {location}", is_alert=False)
-                    await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot: {msg}", is_alert=False)
+                    # Send button message?
+                    await reply_and_mirror(chat_id, msg, buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
 
     return {"status": "ok"}
