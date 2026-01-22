@@ -49,14 +49,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # --- Analytics Helper (Updated) ---
-def log_to_db(phone: str, action_type: str, content: str):
+def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict] = None):
     if not supabase: return
     try:
         data = {
             "phone_number": phone, 
             "action_type": action_type, 
             "content": content,
-            "raw_message": "Logged from bot.py" 
+            "raw_message": payload if payload else None
         }
         supabase.table("logs").insert(data).execute()
     except Exception as e:
@@ -187,7 +187,7 @@ async def webhook(payload: MetaWebhookPayload):
                 # A. Search Logic (Text)
                 if msg_type == 'text':
                     text_body = msg['text']['body'].strip()
-                    log_to_db(chat_id, 'search_text', text_body)
+                    log_to_db(chat_id, 'search_text', text_body, payload=msg)
                     
                     # Silent Mirroring to Telegram
                     await telegram_crm.send_log_to_admin(chat_id, f"🔍 Buscó: {text_body}", is_alert=False)
@@ -202,6 +202,7 @@ async def webhook(payload: MetaWebhookPayload):
                             "(ej: Gol Trend 1.6)"
                         )
                         send_whatsapp_message(chat_id, welcome_text)
+                        await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot: {welcome_text[:100]}...", is_alert=False)
                     else:
                         # Search DB
                         try:
@@ -219,10 +220,12 @@ async def webhook(payload: MetaWebhookPayload):
                                     {"id": "btn_search_error", "title": "🔙 No, error mio"}
                                 ]
                                 send_interactive_buttons(chat_id, reply, buttons)
+                                await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot: No encontró resultados para '{text_body}'.", is_alert=False)
                             
                             # >10 Results
                             elif len(vehicles) > 10:
                                 send_whatsapp_message(chat_id, f"🖐 Encontré demasiados ({len(vehicles)}+). Sé más específico (ej: agregar motor o año).")
+                                await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot: Encontró demasiados ({len(vehicles)}+). Pidió especificidad.", is_alert=False)
 
                             # 1-10 Results
                             else:
@@ -259,6 +262,7 @@ async def webhook(payload: MetaWebhookPayload):
                                     "Resultados",
                                     list_rows
                                 )
+                                await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot: Mostró lista de {len(list_rows)} vehículos.", is_alert=False)
 
                         except Exception as e:
                             print(f"Search Error: {e}")
@@ -272,6 +276,12 @@ async def webhook(payload: MetaWebhookPayload):
                     v_res = supabase.table("vehicle").select("*").eq("vehicle_id", vid).single().execute()
                     vehicle = v_res.data
                     if not vehicle: return
+
+                    # Log selection
+                    sel_brand = vehicle.get('brand_car', '')
+                    sel_model = vehicle.get('model', '')
+                    sel_year = f"{vehicle.get('year_from', '?')}-{vehicle.get('year_to') or 'Pres'}"
+                    await telegram_crm.send_log_to_admin(chat_id, f"👆 Seleccionó: {sel_brand} {sel_model} ({sel_year})", is_alert=False)
 
                     # Fetch Parts
                     parts_res = supabase.table("vehicle_part").select("role, part(brand_filter, part_code, part_type)").eq("vehicle_id", vid).execute()
@@ -304,6 +314,7 @@ async def webhook(payload: MetaWebhookPayload):
                         # Requirement: "🔍 Buscar otro"
                     ]
                     send_interactive_buttons(chat_id, msg_body, buttons)
+                    await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Envió ficha técnica con filtros.", is_alert=False)
 
                 # C. Button Handlers
                 elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
