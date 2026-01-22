@@ -233,18 +233,16 @@ async def webhook(payload: MetaWebhookPayload):
                             await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot.", is_alert=False)
                             continue
                 
+                
                 # Check keywords to break out
-                keywords = ["menu", "start", "hola", "bot"]
+                keywords = ["menu", "start", "bot", "volver", "inicio"]
                 if text_body and text_body.lower().strip() in keywords:
                     # Switch back to bot
                     supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
-                    await reply_and_mirror(chat_id, "🤖 Bot reactivado.")
+                    await reply_and_mirror(chat_id, WELCOME_TEXT)
                     await telegram_crm.send_log_to_admin(chat_id, f"🔄 User detected keyword '{text_body}'. Bot Active.", is_alert=False)
-                    # Proceed to bot logic below? 
-                    # Prompt says: "If matches keywords like 'Menu' or 'Start'" -> Switch?
-                    # "If status == 'human': Do NOT search. Forward text... unless it matches keywords"
-                    # We should probably treat this as a fresh bot command.
-                    status = 'bot' # Local override to fall through to bot logic
+                    # Stop processing
+                    continue
                 else:
                     # Just forward to Telegram
                     if text_body:
@@ -403,8 +401,14 @@ async def webhook(payload: MetaWebhookPayload):
                         # Set human, alert admin
                         supabase.table("users").update({"status": "human"}).eq("phone", chat_id).execute()
                         await telegram_crm.send_log_to_admin(chat_id, "🚨 **Help Request**: User requested assistance.", is_alert=True)
-                        await reply_and_mirror(chat_id, "✅ Ticket creado. Te contestaré en breve.")
+                        await reply_and_mirror(chat_id, "✅ Ticket creado. Te contestaré en breve.", buttons=[{"id": "btn_return_bot", "title": "🤖 Volver al Bot"}])
                     
+                    # 1b. Return to Bot (Exit Human Mode)
+                    elif btn_id == 'btn_return_bot' or btn_id == 'cmd_return_bot':
+                         supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                         await reply_and_mirror(chat_id, WELCOME_TEXT)
+                         await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot via Button.", is_alert=False)
+
                     # 2. Search Error / Back
                     elif btn_id == 'btn_search_error':
                         # Reset status to bot just in case

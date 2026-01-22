@@ -188,13 +188,15 @@ async def handle_admin_reply(message: Message):
 
         # Send to WhatsApp
         supabase.table("users").update({"status": "human"}).eq("phone", phone).execute()
-        send_whatsapp_message(phone, text)
-
-        # Crucial: Append "Return to Bot" if in 'human' mode
-        if status == 'human':
-            # We send a separate button message to allow them to go back to bot
-            buttons = [{"id": "cmd_return_bot", "title": "↩️ Volver al Bot"}]
-            send_interactive_buttons(phone, "Si ya resolviste tu duda:", buttons)
+        
+        # Try to send as interactive button message (cleanest UX)
+        try:
+             exit_btn = [{"id": "btn_return_bot", "title": "🤖 Volver al Bot"}]
+             send_interactive_buttons(phone, text, exit_btn)
+        except Exception as e:
+             # Fallback for very long text (>1024 chars) or other errors
+             print(f"Fallback to text: {e}")
+             send_whatsapp_message(phone, text)
 
     except Exception as e:
         print(f"[Telegram Reply Error] {e}")
