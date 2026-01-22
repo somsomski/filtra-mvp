@@ -100,7 +100,7 @@ async def webhook(payload: MetaWebhookPayload):
             # 1. Get/Create User & Session Management
             if not supabase: continue
 
-            user_res = supabase.table("users").select("*").eq("phone", chat_id).single().execute()
+            user_res = supabase.table("users").select("*").eq("phone", chat_id).maybe_single().execute()
             user = user_res.data
             
             now = datetime.now(timezone.utc)
