@@ -101,7 +101,7 @@ async def webhook(payload: MetaWebhookPayload):
             if not supabase: continue
 
             user_res = supabase.table("users").select("*").eq("phone", chat_id).maybe_single().execute()
-            user = user_res.data
+            user = user_res.data if user_res else None
             
             now = datetime.now(timezone.utc)
             

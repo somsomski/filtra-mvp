@@ -50,7 +50,7 @@ async def get_or_create_topic(phone: str, user_name: str = "Unknown") -> int:
     try:
         # 1. Check DB
         res = supabase.table("users").select("telegram_topic_id").eq("phone", phone).maybe_single().execute()
-        if res.data and res.data.get("telegram_topic_id"):
+        if res and res.data and res.data.get("telegram_topic_id"):
             return int(res.data["telegram_topic_id"])
         
         # 2. Create Topic
@@ -160,7 +160,7 @@ async def handle_admin_reply(message: Message):
     try:
         # Find user by topic_id
         res = supabase.table("users").select("*").eq("telegram_topic_id", topic_id).maybe_single().execute()
-        user = res.data
+        user = res.data if res else None
         
         if not user:
             # Maybe a topic for something else?
