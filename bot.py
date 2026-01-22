@@ -23,6 +23,13 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 else:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+WELCOME_TEXT = (
+    "👋 *Hola! Soy FiltraBot.*\n"
+    "Tu buscador de filtros al instante. 🇦🇷\n\n"
+    "👇 *Escribí el modelo de tu auto:*\n"
+    "(ej: Gol Trend 1.6)"
+)
+
 # --- Lifespan for Telegram Polling ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -261,13 +268,7 @@ async def webhook(payload: MetaWebhookPayload):
                     # Check "Hola" logic or Stop Words if desired, but "Search Logic" is main focus
                     stop_words = ['hola', 'start', 'hi', 'hello', 'menú', 'menu']
                     if text_body.lower() in stop_words:
-                        welcome_text = (
-                            "👋 **Hola! Soy FiltraBot.**\n"
-                            "Tu buscador de filtros al instante. 🇦🇷\n\n"
-                            "👇 **Escribí el modelo de tu auto:**\n"
-                            "(ej: Gol Trend 1.6)"
-                        )
-                        await reply_and_mirror(chat_id, welcome_text)
+                        await reply_and_mirror(chat_id, WELCOME_TEXT)
                     else:
                         # Search DB
                         try:
@@ -390,7 +391,9 @@ async def webhook(payload: MetaWebhookPayload):
                     
                     # 2. Search Error / Back
                     elif btn_id == 'btn_search_error':
-                        await reply_and_mirror(chat_id, "👍 Dale, probá escribiendo de otra forma.")
+                        # Reset status to bot just in case
+                        supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                        await reply_and_mirror(chat_id, WELCOME_TEXT)
 
                     # 3. Dónde comprar
                     elif btn_id.startswith('btn_buy_loc'):
