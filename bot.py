@@ -1,21 +1,19 @@
-
 import os
-import requests
-import json
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from supabase import create_client, Client
 
-# Initialize FastAPI
-app = FastAPI()
+# Services
+from services.whatsapp import send_whatsapp_message, send_interactive_list, send_interactive_buttons, sanitize_argentina_number
+import services.telegram_crm as telegram_crm
 
 # Environment Variables
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-META_TOKEN = os.environ.get("META_TOKEN")
-PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 
 # Initialize Supabase Client
@@ -25,167 +23,51 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 else:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- Analytics Helper ---
+# --- Lifespan for Telegram Polling ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    print("Starting Telegram Bot Polling...")
+    bot, dp = await telegram_crm.start_telegram()
+    
+    # Run polling in background
+    # We use asyncio.create_task to run it without blocking FastAPI
+    polling_task = asyncio.create_task(dp.start_polling(bot))
+    
+    yield
+    
+    # Shutdown
+    print("Stopping Telegram Bot Polling...")
+    await bot.session.close()
+    polling_task.cancel()
+    try:
+        await polling_task
+    except asyncio.CancelledError:
+        pass
+
+# Initialize FastAPI
+app = FastAPI(lifespan=lifespan)
+
+# --- Analytics Helper (Updated) ---
 def log_to_db(phone: str, action_type: str, content: str):
-    """
-    Logs user interaction to Supabase 'logs' table.
-    Schema: phone_number, action_type, content, raw_message (optional but good for debugging)
-    """
-    if not supabase:
-        return
+    if not supabase: return
     try:
         data = {
-            "phone_number": phone,  # User asked for 'phone_number' in payload
-            "action_type": action_type, # User asked for 'action_type'
+            "phone_number": phone, 
+            "action_type": action_type, 
             "content": content,
-            "raw_message": "Logged from bot.py" # Placeholder or could pass actual json
+            "raw_message": "Logged from bot.py" 
         }
-        # Assuming table is 'logs'
         supabase.table("logs").insert(data).execute()
-        print(f"[Analytics] {action_type}: {content}")
     except Exception as e:
         print(f"[Analytics Error] {e}")
-
-# --- Helper Functions ---
-def sanitize_argentina_number(phone_number: str) -> str:
-    """
-    Sanitizes Argentina Text/Sandbox numbers to the LOCAL format required by this specific Meta account.
-    Target format: 54 + AreaCode (11) + 15 + Number.
-    Standard International (54911...) FAILS.
-    
-    Logic:
-    1. Remove '9' after '54'.
-    2. Insert '15' after '11' if missing.
-    """
-    # 0. Clean basic junk
-    phone = phone_number.strip().replace("+", "").replace(" ", "")
-
-    # 1. Check if Argentina (54)
-    if phone.startswith("54"):
-        # 2. REMOVE '9' if present (International Mobile Token)
-        # e.g. 54911... -> 5411...
-        if len(phone) > 2 and phone[2] == '9':
-            phone = "54" + phone[3:]
-        
-        # Now phone is likely 5411... (assuming BA)
-        
-        # 3. ADD '15' (Local Mobile Prefix) for Buenos Aires (11)
-        # We need the result to be 54 11 15 xxxxxxxx
-        if phone.startswith("5411"):
-            # Check if '15' is already there
-            # 5411 says length 4. 
-            # If next chars are 15, we leave it.
-            if not phone.startswith("541115"):
-                # Insert 15
-                phone = "541115" + phone[4:]
-                
-    return phone
-
-def send_whatsapp_message(to_number: str, text: str):
-    """Sends a standard text message."""
-    if not META_TOKEN or not PHONE_NUMBER_ID:
-        print("Error: Meta credentials not set.")
-        return
-
-    normalized_to = sanitize_argentina_number(to_number)
-    
-    url = f"https://graph.facebook.com/v17.0/{PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {META_TOKEN}", "Content-Type": "application/json"}
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": normalized_to,
-        "type": "text",
-        "text": {"body": text}
-    }
-    
-    try:
-        requests.post(url, json=payload, headers=headers).raise_for_status()
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending Text to {normalized_to}: {e}")
-        if e.response is not None:
-             print(f"Meta details: {e.response.text}")
-
-def send_interactive_list(to_number: str, body_text: str, button_text: str, section_title: str, rows: List[Dict]):
-    """
-    Sends an Interactive List Message.
-    """
-    if not META_TOKEN or not PHONE_NUMBER_ID:
-        return
-
-    normalized_to = sanitize_argentina_number(to_number)
-    url = f"https://graph.facebook.com/v17.0/{PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {META_TOKEN}", "Content-Type": "application/json"}
-    
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": normalized_to,
-        "type": "interactive",
-        "interactive": {
-            "type": "list",
-            "body": {"text": body_text},
-            "action": {
-                "button": button_text,
-                "sections": [
-                    {
-                        "title": section_title,
-                        "rows": rows[:10]
-                    }
-                ]
-            }
-        }
-    }
-    
-    try:
-        requests.post(url, json=payload, headers=headers).raise_for_status()
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending List to {normalized_to}: {e}")
-
-def send_interactive_buttons(to_number: str, body_text: str, buttons: List[Dict]):
-    """
-    Sends an Interactive Button Message.
-    """
-    if not META_TOKEN or not PHONE_NUMBER_ID:
-        return
-
-    normalized_to = sanitize_argentina_number(to_number)
-    url = f"https://graph.facebook.com/v17.0/{PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {META_TOKEN}", "Content-Type": "application/json"}
-    
-    formatted_buttons = []
-    for btn in buttons[:3]:
-        formatted_buttons.append({
-            "type": "reply",
-            "reply": {
-                "id": btn['id'],
-                "title": btn['title']
-            }
-        })
-
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": normalized_to,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {"text": body_text},
-            "action": {
-                "buttons": formatted_buttons
-            }
-        }
-    }
-    
-    try:
-        requests.post(url, json=payload, headers=headers).raise_for_status()
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending Buttons to {normalized_to}: {e}")
 
 # --- Pydantic Models ---
 class MetaWebhookPayload(BaseModel):
     object: str
     entry: List[Dict[str, Any]]
 
-# --- Logic ---
-
+# --- Webhook Verification ---
 @app.get("/webhook")
 async def verify_webhook(
     mode: str = Query(..., alias="hub.mode"),
@@ -196,14 +78,12 @@ async def verify_webhook(
         return Response(content=challenge, media_type="text/plain")
     raise HTTPException(status_code=403, detail="Verification failed")
 
-
+# --- Main Logic ---
 @app.post("/webhook")
 async def webhook(payload: MetaWebhookPayload):
     """
-    Main Logic Flow with fixes.
+    Main Hybrid Flow Logic
     """
-    # print(f"Payload received") # Optional logging
-    
     for entry in payload.entry:
         for change in entry.get('changes', []):
             value = change.get('value', {})
@@ -213,205 +93,289 @@ async def webhook(payload: MetaWebhookPayload):
                 continue
 
             msg = messages[0]
-            chat_id = msg['from']
+            chat_id = msg['from'] # Phone number
+            user_name = value.get('contacts', [{}])[0].get('profile', {}).get('name', 'Unknown')
             msg_type = msg.get('type')
+
+            # 1. Get/Create User & Session Management
+            if not supabase: continue
+
+            user_res = supabase.table("users").select("*").eq("phone", chat_id).single().execute()
+            user = user_res.data
             
-            # --- SCENARIO A: Text Message (Search) ---
-            if msg_type == 'text':
-                text_body = msg['text']['body'].strip()
-                log_to_db(chat_id, 'search_text', text_body)
-
-                # 1. Check Keywords
-                stop_words = ['hola', 'start', 'hi', 'hello', 'privet', 'menu', 'test']
-                if text_body.lower() in stop_words:
-                    welcome_text = (
-                        "👋 **Hola! Soy FiltraBot.**\n"
-                        "Tu buscador de filtros al instante. 🇦🇷\n\n"
-                        "🚀 *Estamos en Beta: agregamos autos nuevos cada día.*\n\n"
-                        "👇 **Escribí el modelo de tu auto:**\n"
-                        "(ej: Gol Trend 1.6)"
-                    )
-                    send_whatsapp_message(chat_id, welcome_text)
+            now = datetime.now(timezone.utc)
+            
+            if not user:
+                # Create new user
+                user = {
+                    "phone": chat_id,
+                    "name": user_name,
+                    "status": "bot",
+                    "user_type": "unknown",
+                    "last_active_at": now.isoformat()
+                }
+                supabase.table("users").insert(user).execute()
+                # Also ensure topic exists just in case
+                await telegram_crm.get_or_create_topic(chat_id, user_name)
+            else:
+                # Session Timeout Logic
+                last_active_str = user.get("last_active_at")
+                current_status = user.get("status", "bot")
                 
-                else:
-                    # 2. Search Database
+                # Check timeout for Humans
+                if current_status == 'human' and last_active_str:
                     try:
-                        # Updated columns
-                        res = supabase.table("vehicle").select("vehicle_id, brand_car, model, series_suffix, body_type, fuel_type, year_from, year_to, engine_disp_l, power_hp, engine_valves")\
-                            .or_(f"brand_car.ilike.%{text_body}%,model.ilike.%{text_body}%")\
-                            .limit(12).execute()
-                        
-                        vehicles = res.data
-                        
-                        if not vehicles:
-                            reply = "😕 No encontré ese modelo.\n(Recuerda que es una Beta). ¿Quieres que lo agreguemos prioridad?"
-                            buttons = [{"id": "btn_support", "title": "📩 Avisar soporte"}]
-                            # Check if interactive messages are failing, fallback logic isn't here but we strictly use interactive as requested
-                            send_interactive_buttons(chat_id, reply, buttons)
-                        
-                        elif len(vehicles) > 10:
-                            send_whatsapp_message(chat_id, f"🖐 Encontré demasiados autos ({len(vehicles)}+). Por favor, sé más específico (ej: agregar motor o año).")
-                        
-                        else:
-                            # 1-10 Results -> Interactive List
-                            list_rows = []
-                            for v in vehicles:
-                                # Title: {engine_disp_l}L {power_hp}CV {engine_valves} {fuel_type}
-                                parts_title = []
-                                if v.get('engine_disp_l'):
-                                    parts_title.append(f"{v['engine_disp_l']}L")
-                                if v.get('power_hp'):
-                                    parts_title.append(f"{v['power_hp']}CV")
-                                if v.get('engine_valves'):
-                                    parts_title.append(str(v['engine_valves']))
-                                if v.get('fuel_type') == 'Diesel':
-                                    parts_title.append("Diesel")
-                                
-                                title_str = " ".join(parts_title)
-                                if not title_str:
-                                    title_str = "Motor Desconocido" # Fallback
-                                
-                                # Description: {brand_car} {model} {series_suffix} {body_type} • {year_from}-{year_to}
-                                desc_parts = [
-                                    v.get('brand_car', ''),
-                                    v.get('model', ''),
-                                    v.get('series_suffix') or '',
-                                    v.get('body_type') or ''
-                                ]
-                                # Clean empty strings
-                                desc_parts = [s for s in desc_parts if s]
-                                main_desc = " ".join(desc_parts)
-                                
-                                y_to = str(v['year_to']) if v['year_to'] else 'Pres'
-                                years = f"• {v['year_from']}-{y_to}"
-                                
-                                full_desc = f"{main_desc} {years}"
-                                
-                                list_rows.append({
-                                    "id": str(v['vehicle_id']),
-                                    "title": title_str[:24],
-                                    "description": full_desc[:72]
-                                })
-                            
-                            send_interactive_list(
-                                chat_id, 
-                                "Seleccioná tu versión exacta:", 
-                                "Ver Modelos", 
-                                "Resultados", 
-                                list_rows
-                            )
-
+                        # Handle varied timestamp formats if needed, usually ISO from Supabase
+                        last_active = datetime.fromisoformat(last_active_str.replace("Z", "+00:00"))
+                        if (now - last_active) > timedelta(minutes=60):
+                            # Reset to bot
+                            supabase.table("users").update({"status": "bot", "last_active_at": now.isoformat()}).eq("phone", chat_id).execute()
+                            user['status'] = 'bot' # Update local var
+                            # Log to CRM
+                            await telegram_crm.send_log_to_admin(chat_id, "ℹ️ Sesión expirada. Bot reactivado.", is_alert=False)
                     except Exception as e:
-                        print(f"Search Error: {e}")
-                        send_whatsapp_message(chat_id, "Lo siento, hubo un error buscando. Intenta más tarde.")
+                        print(f"Time check error: {e}")
 
-            # --- SCENARIO B: Interactive List Reply (Vehicle Selected) ---
-            elif msg_type == 'interactive' and msg['interactive']['type'] == 'list_reply':
-                selection = msg['interactive']['list_reply']
-                vehicle_id = selection['id']
+                # Update Last Active
+                supabase.table("users").update({"last_active_at": now.isoformat()}).eq("phone", chat_id).execute()
+
+            # Refresh local status
+            status = user.get('status', 'bot')
+
+            # 2. Hybrid Routing
+            
+            # --- HUMAN MODE ---
+            if status == 'human':
+                text_body = ""
+                if msg_type == 'text':
+                    text_body = msg['text']['body']
+                elif msg_type == 'interactive':
+                    # Even buttons might be sent in human mode if they click old ones?
+                    # Or maybe "Return to Bot" button
+                    if msg['interactive']['type'] == 'button_reply':
+                        if msg['interactive']['button_reply']['id'] == 'cmd_return_bot':
+                            # SWITCH TO BOT
+                            supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                            send_whatsapp_message(chat_id, "🤖 Bot reactivado. ¿En qué te ayudo?")
+                            await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot.", is_alert=False)
+                            continue
                 
-                log_to_db(chat_id, 'select_vehicle', vehicle_id)
+                # Check keywords to break out
+                keywords = ["menu", "start", "hola", "bot"]
+                if text_body and text_body.lower().strip() in keywords:
+                    # Switch back to bot
+                    supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                    send_whatsapp_message(chat_id, "🤖 Bot reactivado.")
+                    await telegram_crm.send_log_to_admin(chat_id, f"🔄 User detected keyword '{text_body}'. Bot Active.", is_alert=False)
+                    # Proceed to bot logic below? 
+                    # Prompt says: "If matches keywords like 'Menu' or 'Start'" -> Switch?
+                    # "If status == 'human': Do NOT search. Forward text... unless it matches keywords"
+                    # We should probably treat this as a fresh bot command.
+                    status = 'bot' # Local override to fall through to bot logic
+                else:
+                    # Just forward to Telegram
+                    if text_body:
+                        await telegram_crm.send_log_to_admin(chat_id, f"📩 {text_body}")
+                    else:
+                        await telegram_crm.send_log_to_admin(chat_id, f"📩 [Media/Other Message Type]")
+                    # STOP here
+                    continue
 
-                try:
-                    # 1. Fetch Vehicle Details for Title/Footer
-                    v_res = supabase.table("vehicle")\
-                        .select("brand_car, model, series_suffix, engine_code, engine_series")\
-                        .eq("vehicle_id", vehicle_id)\
-                        .single().execute()
+            # --- BOT MODE ---
+            if status == 'bot':
+                
+                # A. Search Logic (Text)
+                if msg_type == 'text':
+                    text_body = msg['text']['body'].strip()
+                    log_to_db(chat_id, 'search_text', text_body)
                     
-                    vehicle = v_res.data
-                    if not vehicle:
-                         send_whatsapp_message(chat_id, "Error: Vehículo no encontrado.")
-                         continue
-
-                    # Construct Title
-                    title_parts = [vehicle.get('brand_car'), vehicle.get('model'), vehicle.get('series_suffix')]
-                    display_title = " ".join([p for p in title_parts if p])
-                    
-                    # 2. Fetch Parts
-                    parts_res = supabase.table("vehicle_part")\
-                        .select("role, part(brand_filter, part_code, part_type, notes)")\
-                        .eq("vehicle_id", vehicle_id)\
-                        .execute()
-                    
-                    # Process Parts
-                    # Localization map
-                    type_map = {
-                        'oil': 'Aceite', 
-                        'air': 'Aire', 
-                        'cabin': 'Habitáculo', 
-                        'fuel': 'Combustible'
-                    }
-                    icon_map = {'oil': '🛢️', 'air': '💨', 'cabin': '❄️', 'fuel': '⛽'}
-                    
-                    found_parts = {}
-                    
-                    for item in parts_res.data:
-                        part_data = item.get('part')
-                        if part_data:
-                            ptype = part_data.get('part_type', 'other').lower()
-                            # Format: • **BRAND:** PartNumber
-                            brand = part_data.get('brand_filter', 'Gene.')
-                            code = part_data.get('part_code', '?')
-                            pstr = f"• **{brand}:** {code}"
+                    # Check "Hola" logic or Stop Words if desired, but "Search Logic" is main focus
+                    stop_words = ['hola', 'start', 'hi', 'hello', 'menú', 'menu']
+                    if text_body.lower() in stop_words:
+                        welcome_text = (
+                            "👋 **Hola! Soy FiltraBot.**\n"
+                            "Tu buscador de filtros al instante. 🇦🇷\n\n"
+                            "👇 **Escribí el modelo de tu auto:**\n"
+                            "(ej: Gol Trend 1.6)"
+                        )
+                        send_whatsapp_message(chat_id, welcome_text)
+                    else:
+                        # Search DB
+                        try:
+                            res = supabase.table("vehicle").select("vehicle_id, brand_car, model, series_suffix, body_type, fuel_type, year_from, year_to, engine_disp_l, power_hp, engine_valves")\
+                                .or_(f"brand_car.ilike.%{text_body}%,model.ilike.%{text_body}%")\
+                                .limit(12).execute()
                             
-                            if ptype not in found_parts:
-                                found_parts[ptype] = []
-                            found_parts[ptype].append(pstr)
+                            vehicles = res.data
+
+                            # 0 Results
+                            if not vehicles:
+                                reply = f"🤔 No encontré '{text_body}'. ¿No aparece o es un error?"
+                                buttons = [
+                                    {"id": "btn_human_help", "title": "✅ Sí, pedir ayuda"},
+                                    {"id": "btn_search_error", "title": "🔙 No, error mio"}
+                                ]
+                                send_interactive_buttons(chat_id, reply, buttons)
+                            
+                            # >10 Results
+                            elif len(vehicles) > 10:
+                                send_whatsapp_message(chat_id, f"🖐 Encontré demasiados ({len(vehicles)}+). Sé más específico (ej: agregar motor o año).")
+
+                            # 1-10 Results
+                            else:
+                                list_rows = []
+                                for v in vehicles:
+                                    # Create Title
+                                    parts_title = []
+                                    if v.get('engine_disp_l'): parts_title.append(f"{v['engine_disp_l']}L")
+                                    if v.get('power_hp'): parts_title.append(f"{v['power_hp']}CV")
+                                    if v.get('engine_valves'): parts_title.append(str(v['engine_valves']))
+                                    if v.get('fuel_type') == 'Diesel': parts_title.append("Diesel")
+                                    
+                                    title_str = " ".join(parts_title) or "Motor Desconocido"
+                                    
+                                    # Create Desc
+                                    desc_parts = [
+                                        v.get('brand_car'), v.get('model'), 
+                                        v.get('series_suffix'), v.get('body_type')
+                                    ]
+                                    main_desc = " ".join([s for s in desc_parts if s])
+                                    y_to = str(v['year_to']) if v['year_to'] else 'Pres'
+                                    full_desc = f"{main_desc} • {v['year_from']}-{y_to}"
+                                    
+                                    list_rows.append({
+                                        "id": str(v['vehicle_id']),
+                                        "title": title_str[:24],
+                                        "description": full_desc[:72]
+                                    })
+                                
+                                send_interactive_list(
+                                    chat_id,
+                                    "Seleccioná tu versión exacta:",
+                                    "Ver Modelos",
+                                    "Resultados",
+                                    list_rows
+                                )
+
+                        except Exception as e:
+                            print(f"Search Error: {e}")
+                            send_whatsapp_message(chat_id, "⚠️ Error en búsqueda.")
+
+                # B. Vehicle Card (List Selection)
+                elif msg_type == 'interactive' and msg['interactive']['type'] == 'list_reply':
+                    vid = msg['interactive']['list_reply']['id']
                     
+                    # Fetch Vehicle
+                    v_res = supabase.table("vehicle").select("*").eq("vehicle_id", vid).single().execute()
+                    vehicle = v_res.data
+                    if not vehicle: return
+
+                    # Fetch Parts
+                    parts_res = supabase.table("vehicle_part").select("role, part(brand_filter, part_code, part_type)").eq("vehicle_id", vid).execute()
+                    
+                    # Build Message
+                    display_title = f"{vehicle.get('brand_car')} {vehicle.get('model')}"
                     msg_body = f"🚗 **{display_title}**\n\n"
                     
-                    # Order: Aceite, Aire, Habitáculo, Combustible
-                    order = ['oil', 'air', 'cabin', 'fuel']
+                    found_parts = {}
+                    for item in parts_res.data:
+                        part = item.get('part')
+                        if part:
+                            ptype = part.get('part_type', 'other').lower()
+                            line = f"• {part.get('brand_filter')}: {part.get('part_code')}"
+                            found_parts.setdefault(ptype, []).append(line)
                     
-                    for k in order:
+                    type_dic = {'oil': '🛢️ Aceite', 'air': '💨 Aire', 'cabin': '❄️ Habitáculo', 'fuel': '⛽ Combustible'}
+                    for k, label in type_dic.items():
                         if k in found_parts:
-                            label = type_map.get(k, k.capitalize())
-                            icon = icon_map.get(k, '🔧')
-                            
-                            msg_body += f"{icon} **{label}**\n"
-                            for line in found_parts[k]:
-                                msg_body += f"{line}\n"
-                            msg_body += "\n" # Spacing
+                            msg_body += f"{label}\n" + "\n".join(found_parts[k]) + "\n\n"
                     
-                    if not found_parts:
-                        msg_body += "⚠️ No tenemos filtros cargados para este auto aún.\n"
-                    
-                    # Footer
-                    eng_code = vehicle.get('engine_code')
-                    eng_series = vehicle.get('engine_series')
-                    if eng_code or eng_series:
-                        code_str = f"{eng_code or ''} {eng_series or ''}".strip()
-                        msg_body += f"🔧 Motor: {code_str}"
+                    if not found_parts: msg_body += "⚠️ Sin filtros cargados.\n"
 
+                    # 3 Action Buttons
                     buttons = [
-                        {"id": "btn_buy", "title": "📍 Dónde comprar?"},
-                        {"id": "btn_b2b", "title": "🔧 Soy Taller"},
-                        {"id": "btn_error", "title": "📝 Reportar Error"}
+                        {"id": "btn_buy_loc", "title": "📍 Dónde comprar"},
+                        {"id": "btn_menu_mech", "title": "⚙️ Menú / Taller"},
+                        {"id": "btn_search_error", "title": "🔍 Buscar otro"} 
+                        # Using search_error as 'search other' roughly, or just simple text instructions?
+                        # Requirement: "🔍 Buscar otro"
                     ]
                     send_interactive_buttons(chat_id, msg_body, buttons)
 
-                except Exception as e:
-                    print(f"Details Error: {e}")
-                    send_whatsapp_message(chat_id, "Error recuperando datos del vehículo.")
+                # C. Button Handlers
+                elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
+                    btn_id = msg['interactive']['button_reply']['id']
+                    
+                    # 1. Human Help Request (No Result)
+                    if btn_id == 'btn_human_help':
+                        # Set human, alert admin
+                        supabase.table("users").update({"status": "human"}).eq("phone", chat_id).execute()
+                        await telegram_crm.send_log_to_admin(chat_id, "🚨 **Help Request**: User requested assistance.", is_alert=True)
+                        send_whatsapp_message(chat_id, "✅ Ticket creado. Te contestaré en breve.")
+                    
+                    # 2. Search Error / Back
+                    elif btn_id == 'btn_search_error':
+                        send_whatsapp_message(chat_id, "👍 Dale, probá escribiendo de otra forma.")
 
-            # --- SCENARIO C: Interactive Button Reply (Actions) ---
-            elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
-                btn_id = msg['interactive']['button_reply']['id']
-                log_to_db(chat_id, 'click_button', btn_id)
+                    # 3. Dónde comprar
+                    elif btn_id == 'btn_buy_loc':
+                        # Ask for location
+                        # We need to set a temporary state or just expect the next message?
+                        # For simplicity in this logic, we'll just Ask.
+                        # But wait, if they type "Palermo", the bot will search for car "Palermo".
+                        # Current implementation doesn't support multistep flows easily without state.
+                        # However, we can use "status". Maybe a sub-status? 
+                        # Or, prompt says: "Capture next text input -> Save to users.location"
+                        # I can add a specific status: 'waiting_location'.
+                        
+                        supabase.table("users").update({"status": "waiting_location"}).eq("phone", chat_id).execute()
+                        send_whatsapp_message(chat_id, "📍 ¿De qué Barrio o Ciudad sos?")
+                    
+                    # 4. Menú / Taller
+                    elif btn_id == 'btn_menu_mech':
+                        reply = "¿Eres colega o encontraste un error?"
+                        sub_btns = [
+                            {"id": "btn_is_mechanic", "title": "🔧 Soy Mecánico"},
+                            {"id": "btn_is_seller", "title": "🏪 Soy Vendedor"},
+                            {"id": "btn_report_err", "title": "📝 Reportar error"}
+                        ]
+                        send_interactive_buttons(chat_id, reply, sub_btns)
 
-                support_number = "5491132273621"
+                    # 5. Handler 🔧 Soy Mecánico
+                    elif btn_id == 'btn_is_mechanic':
+                        reply = "Ofrecemos catálogos PRO para talleres. ¿Te anoto en la lista?"
+                        # Button [✅ Sí, quiero PRO]
+                        # API limits 3 buttons.
+                        send_interactive_buttons(chat_id, reply, [{"id": "btn_mech_confirm", "title": "✅ Sí, quiero PRO"}])
 
-                if btn_id == 'btn_buy':
-                    link = f"https://wa.me/{support_number}?text=Busco_vendedor_zona_para_mi_auto"
-                    send_whatsapp_message(chat_id, f"🗺 Para buscar vendedores en tu zona, avísanos aquí: {link}")
-                
-                elif btn_id == 'btn_b2b':
-                    link = f"https://wa.me/{support_number}?text=Soy_taller_y_quiero_sumar_mi_catalogo"
-                    send_whatsapp_message(chat_id, f"🤝 Para sumar tu catálogo, escribinos aquí: {link}")
-                
-                elif btn_id in ['btn_error', 'btn_support']:
-                    link = f"https://wa.me/{support_number}?text=Error_en_auto_o_dato_faltante"
-                    send_whatsapp_message(chat_id, f"🙏 Reportar error aquí: {link}")
+                    elif btn_id == 'btn_mech_confirm':
+                        supabase.table("users").update({"user_type": "mechanic"}).eq("phone", chat_id).execute()
+                        await telegram_crm.send_log_to_admin(chat_id, "👨‍🔧 **User is Mechanic** (Requested PRO)", is_alert=True)
+                        send_whatsapp_message(chat_id, "¡Anotado! Te contactaremos.")
+
+                    # 6. Handler 🏪 Soy Vendedor
+                    elif btn_id == 'btn_is_seller':
+                        reply = "¿Quieres recibir clientes de tu zona?"
+                        send_interactive_buttons(chat_id, reply, [{"id": "btn_seller_confirm", "title": "👋 Contactar"}])
+
+                    elif btn_id == 'btn_seller_confirm':
+                        supabase.table("users").update({"user_type": "seller"}).eq("phone", chat_id).execute()
+                        await telegram_crm.send_log_to_admin(chat_id, "🏪 **User is Seller** (Wants Leads)", is_alert=True)
+                        send_whatsapp_message(chat_id, "¡Genial! Hablamos pronto.")
+
+            # --- SPECIAL STATUS: Waiting Location ---
+            elif status == 'waiting_location':
+                if msg_type == 'text':
+                    location = msg['text']['body']
+                    # Save location
+                    supabase.table("users").update({"location": location, "status": "bot"}).eq("phone", chat_id).execute()
+                    
+                    msg = f"Gracias. Te avisaremos cuando agreguemos tiendas en {location}."
+                    # [Buscar otro] button is requested but can be just text instruction or button if possible.
+                    # Send button message?
+                    send_interactive_buttons(chat_id, msg, [{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
+                    
+                    # Log
+                    await telegram_crm.send_log_to_admin(chat_id, f"📍 Lead Location: {location}", is_alert=False)
 
     return {"status": "ok"}
