@@ -59,7 +59,8 @@ def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict
             "raw_message": payload if payload else None
         }
         supabase.table("logs").insert(data).execute()
-
+    except Exception as e:
+        print(f"[Analytics Error] {e}")
 # --- Unified Response Wrapper ---
 async def reply_and_mirror(phone: str, text: str, buttons: list = None, list_rows: list = None, list_title: str = None):
     """
