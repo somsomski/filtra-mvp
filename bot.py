@@ -286,7 +286,7 @@ async def webhook(payload: MetaWebhookPayload):
                                 if status == 'menu_mode':
                                     # Treat as Feedback
                                     await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback:** {text_body}", is_alert=True)
-                                    await reply_and_mirror(chat_id, "✅ Gracias. Mensaje recibido, lo revisaremos.")
+                                    await reply_and_mirror(chat_id, "✅ Gracias. Mensaje recibido, lo revisaremos.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
                                     # Reset to bot
                                     supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                                 else:
@@ -341,7 +341,7 @@ async def webhook(payload: MetaWebhookPayload):
                             if status == 'menu_mode':
                                 # Failed search in menu mode -> Likely complex feedback
                                 await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback (Error Trigger):** {text_body}", is_alert=True)
-                                await reply_and_mirror(chat_id, "✅ Mensaje recibido.")
+                                await reply_and_mirror(chat_id, "✅ Mensaje recibido.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
                                 supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                             else:
                                 send_whatsapp_message(chat_id, "⚠️ Error en búsqueda.")
