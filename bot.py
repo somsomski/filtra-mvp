@@ -226,10 +226,10 @@ async def webhook(payload: MetaWebhookPayload):
                     # Even buttons might be sent in human mode if they click old ones?
                     # Or maybe "Return to Bot" button
                     if msg['interactive']['type'] == 'button_reply':
-                        if msg['interactive']['button_reply']['id'] == 'cmd_return_bot':
+                        if msg['interactive']['button_reply']['id'] == 'btn_return_bot':
                             # SWITCH TO BOT
                             supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
-                            await reply_and_mirror(chat_id, "🤖 Bot reactivado. ¿En qué te ayudo?")
+                            await reply_and_mirror(chat_id, WELCOME_TEXT)
                             await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot.", is_alert=False)
                             continue
                 
@@ -404,7 +404,7 @@ async def webhook(payload: MetaWebhookPayload):
                         await reply_and_mirror(chat_id, "✅ Ticket creado. Te contestaré en breve.", buttons=[{"id": "btn_return_bot", "title": "🤖 Volver al Bot"}])
                     
                     # 1b. Return to Bot (Exit Human Mode)
-                    elif btn_id == 'btn_return_bot' or btn_id == 'cmd_return_bot':
+                    elif btn_id == 'btn_return_bot':
                          supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                          await reply_and_mirror(chat_id, WELCOME_TEXT)
                          await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot via Button.", is_alert=False)
