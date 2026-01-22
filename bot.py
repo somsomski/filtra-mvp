@@ -254,13 +254,16 @@ async def webhook(payload: MetaWebhookPayload):
                     # STOP here
                     continue
 
-            # --- BOT MODE ---
-            if status == 'bot':
+            # --- BOT MODE (Standard & Menu) ---
+            if status in ['bot', 'menu_mode']:
                 
                 # A. Search Logic (Text)
                 if msg_type == 'text':
                     text_body = msg['text']['body'].strip()
                     log_to_db(chat_id, 'search_text', text_body, payload=msg)
+                    
+                    # Sanitize for SQL/Supabase filter to prevent syntax errors
+                    search_term = text_body.replace(',', '').replace('(', '').replace(')', '').replace("'", "")
                     
                     # Silent Mirroring to Telegram
                     await telegram_crm.send_log_to_admin(chat_id, f"🔍 Buscó: {text_body}", is_alert=False)
@@ -273,19 +276,26 @@ async def webhook(payload: MetaWebhookPayload):
                         # Search DB
                         try:
                             res = supabase.table("vehicle").select("vehicle_id, brand_car, model, series_suffix, body_type, fuel_type, year_from, year_to, engine_disp_l, power_hp, engine_valves")\
-                                .or_(f"brand_car.ilike.%{text_body}%,model.ilike.%{text_body}%")\
+                                .or_(f"brand_car.ilike.%{search_term}%,model.ilike.%{search_term}%")\
                                 .limit(12).execute()
                             
                             vehicles = res.data
 
                             # 0 Results
                             if not vehicles:
-                                reply = f"🤔 No encontré '{text_body}'. ¿No aparece o es un error?"
-                                buttons = [
-                                    {"id": "btn_human_help", "title": "🙋‍♂️ Ayuda / Error"},
-                                    {"id": "btn_search_error", "title": "🔙 No, error mio"}
-                                ]
-                                await reply_and_mirror(chat_id, reply, buttons=buttons)
+                                if status == 'menu_mode':
+                                    # Treat as Feedback
+                                    await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback:** {text_body}", is_alert=True)
+                                    await reply_and_mirror(chat_id, "✅ Gracias. Mensaje recibido, lo revisaremos.")
+                                    # Reset to bot
+                                    supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                                else:
+                                    reply = f"🤔 No encontré '{text_body}'. ¿No aparece o es un error?"
+                                    buttons = [
+                                        {"id": "btn_human_help", "title": "🙋‍♂️ Ayuda / Error"},
+                                        {"id": "btn_search_error", "title": "🔙 No, error mio"}
+                                    ]
+                                    await reply_and_mirror(chat_id, reply, buttons=buttons)
                             
                             # >10 Results
                             elif len(vehicles) > 10:
@@ -328,7 +338,13 @@ async def webhook(payload: MetaWebhookPayload):
 
                         except Exception as e:
                             print(f"Search Error: {e}")
-                            send_whatsapp_message(chat_id, "⚠️ Error en búsqueda.")
+                            if status == 'menu_mode':
+                                # Failed search in menu mode -> Likely complex feedback
+                                await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback (Error Trigger):** {text_body}", is_alert=True)
+                                await reply_and_mirror(chat_id, "✅ Mensaje recibido.")
+                                supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                            else:
+                                send_whatsapp_message(chat_id, "⚠️ Error en búsqueda.")
 
                 # B. Vehicle Card (List Selection)
                 elif msg_type == 'interactive' and msg['interactive']['type'] == 'list_reply':
@@ -403,6 +419,9 @@ async def webhook(payload: MetaWebhookPayload):
                     
                     # 4. Menú / Taller
                     elif btn_id.startswith('btn_menu_mech'):
+                        # Set to menu_mode to capturing feedback
+                        supabase.table("users").update({"status": "menu_mode"}).eq("phone", chat_id).execute()
+
                         # Extract VID if needed, but we pass it forward in the Back button
                         try:
                             parts = btn_id.split('_')
