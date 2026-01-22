@@ -314,7 +314,7 @@ async def webhook(payload: MetaWebhookPayload):
                         # Requirement: "🔍 Buscar otro"
                     ]
                     send_interactive_buttons(chat_id, msg_body, buttons)
-                    await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Envió ficha técnica con filtros.", is_alert=False)
+                    await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot:\n{msg_body}", is_alert=False)
 
                 # C. Button Handlers
                 elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
@@ -398,5 +398,6 @@ async def webhook(payload: MetaWebhookPayload):
                     
                     # Log
                     await telegram_crm.send_log_to_admin(chat_id, f"📍 Lead Location: {location}", is_alert=False)
+                    await telegram_crm.send_log_to_admin(chat_id, f"🤖 Bot: {msg}", is_alert=False)
 
     return {"status": "ok"}
