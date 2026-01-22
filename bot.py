@@ -337,11 +337,9 @@ async def webhook(payload: MetaWebhookPayload):
 
                     # 3 Action Buttons
                     buttons = [
-                        {"id": "btn_buy_loc", "title": "📍 Dónde comprar"},
-                        {"id": "btn_menu_mech", "title": "⚙️ Menú / Taller"},
+                        {"id": f"btn_buy_loc_{vid}", "title": "📍 Dónde comprar"},
+                        {"id": f"btn_menu_mech_{vid}", "title": "⚙️ Menú / Taller"},
                         {"id": "btn_search_error", "title": "🔍 Buscar otro"} 
-                        # Using search_error as 'search other' roughly, or just simple text instructions?
-                        # Requirement: "🔍 Buscar otro"
                     ]
                     await reply_and_mirror(chat_id, msg_body, buttons=buttons)
 
@@ -363,28 +361,35 @@ async def webhook(payload: MetaWebhookPayload):
                         await reply_and_mirror(chat_id, "👍 Dale, probá escribiendo de otra forma.")
 
                     # 3. Dónde comprar
-                    elif btn_id == 'btn_buy_loc':
+                    elif btn_id.startswith('btn_buy_loc'):
                         # Ask for location
-                        # We need to set a temporary state or just expect the next message?
-                        # For simplicity in this logic, we'll just Ask.
-                        # But wait, if they type "Palermo", the bot will search for car "Palermo".
-                        # Current implementation doesn't support multistep flows easily without state.
-                        # However, we can use "status". Maybe a sub-status? 
-                        # Or, prompt says: "Capture next text input -> Save to users.location"
-                        # I can add a specific status: 'waiting_location'.
-                        
                         supabase.table("users").update({"status": "waiting_location"}).eq("phone", chat_id).execute()
                         await reply_and_mirror(chat_id, "📍 ¿De qué Barrio o Ciudad sos?")
                     
                     # 4. Menú / Taller
-                    elif btn_id == 'btn_menu_mech':
+                    elif btn_id.startswith('btn_menu_mech'):
+                        # Extract VID if needed, but we pass it forward in the Back button
+                        try:
+                            parts = btn_id.split('_')
+                            vid = parts[-1] # "btn_menu_mech_123" -> "123"
+                        except:
+                            vid = "0"
+
                         reply = "¿Eres colega? Seleccioná una opción.\n\n⚠️ ¿Encontraste un error? Simplemente escribe los detalles aquí y te responderemos."
                         sub_btns = [
                             {"id": "btn_is_mechanic", "title": "🔧 Soy Mecánico"},
                             {"id": "btn_is_seller", "title": "🏪 Soy Vendedor"},
-                            {"id": "btn_search_error", "title": "� Volver"}
+                            {"id": f"btn_back_actions_{vid}", "title": "🔙 Volver"}
                         ]
                         await reply_and_mirror(chat_id, reply, buttons=sub_btns)
+
+                    # 4b. Back to Actions (Soft Back)
+                    elif btn_id.startswith('btn_back_actions'):
+                        try:
+                            vid = btn_id.split('_')[-1]
+                            await send_car_actions(chat_id, vid)
+                        except Exception as e:
+                            await reply_and_mirror(chat_id, "⚠️ Error recuperando menú.")
 
                     # 5. Handler 🔧 Soy Mecánico
                     elif btn_id == 'btn_is_mechanic':
