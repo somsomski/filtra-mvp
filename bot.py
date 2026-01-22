@@ -249,7 +249,7 @@ async def webhook(payload: MetaWebhookPayload):
                             if not vehicles:
                                 reply = f"🤔 No encontré '{text_body}'. ¿No aparece o es un error?"
                                 buttons = [
-                                    {"id": "btn_human_help", "title": "✅ Sí, pedir ayuda"},
+                                    {"id": "btn_human_help", "title": "🙋‍♂️ Ayuda / Error"},
                                     {"id": "btn_search_error", "title": "🔙 No, error mio"}
                                 ]
                                 await reply_and_mirror(chat_id, reply, buttons=buttons)
@@ -324,7 +324,8 @@ async def webhook(payload: MetaWebhookPayload):
                         part = item.get('part')
                         if part:
                             ptype = part.get('part_type', 'other').lower()
-                            line = f"• {part.get('brand_filter')}: {part.get('part_code')}"
+                            code = part.get('part_code', '').replace('*', '')
+                            line = f"• {part.get('brand_filter')}: {code}"
                             found_parts.setdefault(ptype, []).append(line)
                     
                     type_dic = {'oil': '🛢️ Aceite', 'air': '💨 Aire', 'cabin': '❄️ Habitáculo', 'fuel': '⛽ Combustible'}
@@ -377,11 +378,11 @@ async def webhook(payload: MetaWebhookPayload):
                     
                     # 4. Menú / Taller
                     elif btn_id == 'btn_menu_mech':
-                        reply = "¿Eres colega o encontraste un error?"
+                        reply = "¿Eres colega? Seleccioná una opción.\n\n⚠️ ¿Encontraste un error? Simplemente escribe los detalles aquí y te responderemos."
                         sub_btns = [
                             {"id": "btn_is_mechanic", "title": "🔧 Soy Mecánico"},
                             {"id": "btn_is_seller", "title": "🏪 Soy Vendedor"},
-                            {"id": "btn_report_err", "title": "📝 Reportar error"}
+                            {"id": "btn_search_error", "title": "� Volver"}
                         ]
                         await reply_and_mirror(chat_id, reply, buttons=sub_btns)
 
@@ -395,7 +396,8 @@ async def webhook(payload: MetaWebhookPayload):
                     elif btn_id == 'btn_mech_confirm':
                         supabase.table("users").update({"user_type": "mechanic"}).eq("phone", chat_id).execute()
                         await telegram_crm.send_log_to_admin(chat_id, "👨‍🔧 **User is Mechanic** (Requested PRO)", is_alert=True)
-                        await reply_and_mirror(chat_id, "¡Anotado! Te contactaremos.")
+                        await telegram_crm.send_log_to_admin(chat_id, "👨‍🔧 **User is Mechanic** (Requested PRO)", is_alert=True)
+                        await reply_and_mirror(chat_id, "¡Anotado! Te contactaremos.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuestos"}])
 
                     # 6. Handler 🏪 Soy Vendedor
                     elif btn_id == 'btn_is_seller':
@@ -405,7 +407,8 @@ async def webhook(payload: MetaWebhookPayload):
                     elif btn_id == 'btn_seller_confirm':
                         supabase.table("users").update({"user_type": "seller"}).eq("phone", chat_id).execute()
                         await telegram_crm.send_log_to_admin(chat_id, "🏪 **User is Seller** (Wants Leads)", is_alert=True)
-                        await reply_and_mirror(chat_id, "¡Genial! Hablamos pronto.")
+                        await telegram_crm.send_log_to_admin(chat_id, "🏪 **User is Seller** (Wants Leads)", is_alert=True)
+                        await reply_and_mirror(chat_id, "¡Genial! Hablamos pronto.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuestos"}])
 
             # --- SPECIAL STATUS: Waiting Location ---
             elif status == 'waiting_location':
@@ -419,6 +422,6 @@ async def webhook(payload: MetaWebhookPayload):
                     # Log
                     await telegram_crm.send_log_to_admin(chat_id, f"📍 Lead Location: {location}", is_alert=False)
                     # Send button message?
-                    await reply_and_mirror(chat_id, msg, buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
+                    await reply_and_mirror(chat_id, msg, buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuestos"}])
 
     return {"status": "ok"}

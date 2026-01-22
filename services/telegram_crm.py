@@ -187,6 +187,7 @@ async def handle_admin_reply(message: Message):
         status = user.get('status', 'bot')
 
         # Send to WhatsApp
+        supabase.table("users").update({"status": "human"}).eq("phone", phone).execute()
         send_whatsapp_message(phone, text)
 
         # Crucial: Append "Return to Bot" if in 'human' mode
