@@ -319,6 +319,8 @@ async def webhook(payload: MetaWebhookPayload):
                 # C. Button Handlers
                 elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
                     btn_id = msg['interactive']['button_reply']['id']
+                    btn_title = msg['interactive']['button_reply']['title']
+                    await telegram_crm.send_log_to_admin(chat_id, f"👆 Click: {btn_title}", is_alert=False)
                     
                     # 1. Human Help Request (No Result)
                     if btn_id == 'btn_human_help':
@@ -330,6 +332,7 @@ async def webhook(payload: MetaWebhookPayload):
                     # 2. Search Error / Back
                     elif btn_id == 'btn_search_error':
                         send_whatsapp_message(chat_id, "👍 Dale, probá escribiendo de otra forma.")
+                        await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Pidió reintentar búsqueda.", is_alert=False)
 
                     # 3. Dónde comprar
                     elif btn_id == 'btn_buy_loc':
@@ -344,6 +347,7 @@ async def webhook(payload: MetaWebhookPayload):
                         
                         supabase.table("users").update({"status": "waiting_location"}).eq("phone", chat_id).execute()
                         send_whatsapp_message(chat_id, "📍 ¿De qué Barrio o Ciudad sos?")
+                        await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Preguntó ¿De qué barrio sos?", is_alert=False)
                     
                     # 4. Menú / Taller
                     elif btn_id == 'btn_menu_mech':
@@ -354,6 +358,7 @@ async def webhook(payload: MetaWebhookPayload):
                             {"id": "btn_report_err", "title": "📝 Reportar error"}
                         ]
                         send_interactive_buttons(chat_id, reply, sub_btns)
+                        await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Mostró opciones de Taller/Vendedor.", is_alert=False)
 
                     # 5. Handler 🔧 Soy Mecánico
                     elif btn_id == 'btn_is_mechanic':
@@ -366,6 +371,7 @@ async def webhook(payload: MetaWebhookPayload):
                         supabase.table("users").update({"user_type": "mechanic"}).eq("phone", chat_id).execute()
                         await telegram_crm.send_log_to_admin(chat_id, "👨‍🔧 **User is Mechanic** (Requested PRO)", is_alert=True)
                         send_whatsapp_message(chat_id, "¡Anotado! Te contactaremos.")
+                        await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Confirmó registro.", is_alert=False)
 
                     # 6. Handler 🏪 Soy Vendedor
                     elif btn_id == 'btn_is_seller':
@@ -376,6 +382,7 @@ async def webhook(payload: MetaWebhookPayload):
                         supabase.table("users").update({"user_type": "seller"}).eq("phone", chat_id).execute()
                         await telegram_crm.send_log_to_admin(chat_id, "🏪 **User is Seller** (Wants Leads)", is_alert=True)
                         send_whatsapp_message(chat_id, "¡Genial! Hablamos pronto.")
+                        await telegram_crm.send_log_to_admin(chat_id, "🤖 Bot: Confirmó registro.", is_alert=False)
 
             # --- SPECIAL STATUS: Waiting Location ---
             elif status == 'waiting_location':
