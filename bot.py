@@ -61,6 +61,38 @@ def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict
         supabase.table("logs").insert(data).execute()
     except Exception as e:
         print(f"[Analytics Error] {e}")
+# --- Helper for Context-Aware Navigation ---
+async def send_car_actions(phone: str, vehicle_id: str):
+    """
+    Restores the 3 main actions for a specific vehicle without resending the full card.
+    """
+    try:
+        # Validate ID
+        if not vehicle_id or not vehicle_id.isdigit():
+            # If invalid ID (e.g. legacy button), maybe just send a generic menu or "Search Again"
+            await reply_and_mirror(phone, "⚠️ No pude recuperar el contexto. Por favor buscá de nuevo.")
+            return
+
+        # Fetch minimal vehicle data for context
+        v_res = supabase.table("vehicle").select("brand_car, model").eq("vehicle_id", vehicle_id).single().execute()
+        v = v_res.data
+        if not v:
+            send_whatsapp_message(phone, "⚠️ Vehículo no encontrado.")
+            return
+
+        text = f"🔙 Opciones para *{v.get('brand_car')} {v.get('model')}*:"
+        
+        buttons = [
+            {"id": f"btn_buy_loc_{vehicle_id}", "title": "📍 Dónde comprar"},
+            {"id": f"btn_menu_mech_{vehicle_id}", "title": "⚙️ Menú / Taller"},
+            {"id": "btn_search_error", "title": "🔍 Buscar otro"}
+        ]
+        
+        await reply_and_mirror(phone, text, buttons=buttons)
+    except Exception as e:
+        print(f"Send Car Actions Error: {e}")
+        await reply_and_mirror(phone, "⚠️ Error interno recuperando menú.")
+
 # --- Unified Response Wrapper ---
 async def reply_and_mirror(phone: str, text: str, buttons: list = None, list_rows: list = None, list_title: str = None):
     """
