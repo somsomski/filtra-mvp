@@ -222,8 +222,8 @@ async def search_vehicle(query_data: dict, limit: int = 12):
             # SHORT TOKENS: Strict Search (Word Boundary) -> \ytoken\y
             # Example: "I" -> Matches "Golf I", but NOT "Golf III" or "GTI"
             # We use 'imatch' for case-insensitive regex.
-            # Python escape for \y is \\y.
-            regex_pattern = f"\\\\y{safe_token}\\\\y"
+            # Python escape for \y is \\y (produces \y in string).
+            regex_pattern = f"\\y{safe_token}\\y"
             
             # PostgREST syntax: col.imatch.pattern
             or_conditions = ",".join([f"{col}.imatch.{regex_pattern}" for col in target_cols])
