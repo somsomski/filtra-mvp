@@ -210,9 +210,24 @@ async def search_vehicle(query_data: dict, limit: int = 12):
     ]
     
     for token in query_data.get("text_tokens", []):
-        # Build the OR string: "col1.ilike.%tok%,col2.ilike.%tok%,..."
-        or_conditions = ",".join([f"{col}.ilike.%{token}%" for col in target_cols])
-        query = query.or_(or_conditions)
+        # Sanitize token for SQL/Regex safety
+        safe_token = token.replace("'", "").replace("%", "")
+        
+        if len(safe_token) > 3:
+            # LONG TOKENS: Fuzzy Search (Contains) -> %token%
+            # Example: "Partn" -> "Partner"
+            or_conditions = ",".join([f"{col}.ilike.%{safe_token}%" for col in target_cols])
+            query = query.or_(or_conditions)
+        else:
+            # SHORT TOKENS: Strict Search (Word Boundary) -> \ytoken\y
+            # Example: "I" -> Matches "Golf I", but NOT "Golf III" or "GTI"
+            # We use 'imatch' for case-insensitive regex.
+            # Python escape for \y is \\y.
+            regex_pattern = f"\\\\y{safe_token}\\\\y"
+            
+            # PostgREST syntax: col.imatch.pattern
+            or_conditions = ",".join([f"{col}.imatch.{regex_pattern}" for col in target_cols])
+            query = query.or_(or_conditions)
         
     res = query.limit(limit).execute()
     return res.data
