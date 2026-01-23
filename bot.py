@@ -165,6 +165,17 @@ def parse_search_query(text: str) -> dict:
         
     return parsed
 
+def to_accent_regex(text: str) -> str:
+    """
+    Converts text to accent-insensitive regex pattern.
+    Example: "mio" -> "m[ií]o"
+    """
+    mapping = {
+        'a': '[aá]', 'e': '[eé]', 'i': '[ií]', 'o': '[oó]', 'u': '[uúü]', 
+        'n': '[nñ]'
+    }
+    return "".join([mapping.get(c, c) for c in text])
+
 async def search_vehicle(query_data: dict, limit: int = 12):
     """
     Executes the dynamic Supabase query.
@@ -214,9 +225,14 @@ async def search_vehicle(query_data: dict, limit: int = 12):
         safe_token = token.replace("'", "").replace("%", "")
         
         if len(safe_token) > 3:
-            # LONG TOKENS: Fuzzy Search (Contains) -> %token%
-            # Example: "Partn" -> "Partner"
-            or_conditions = ",".join([f"{col}.ilike.%{safe_token}%" for col in target_cols])
+            # LONG TOKENS: Accent-Insensitive Regex Search
+            # Example: "Megane" -> matches "Megane", "Mégane"
+            # We use 'imatch' which is a case-insensitive regex match (partial by default in Postgres regex?)
+            # Wait, Postgres regex 'text ~ pattern' looks for pattern anywhere in text.
+            # So "m[ií]o" matches "Clio Mío".
+            
+            fuzzy_token = to_accent_regex(safe_token)
+            or_conditions = ",".join([f"{col}.imatch.{fuzzy_token}" for col in target_cols])
             query = query.or_(or_conditions)
         else:
             # SHORT TOKENS: Strict Search (Word Boundary) -> \ytoken\y
