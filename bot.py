@@ -125,23 +125,37 @@ def parse_search_query(text: str) -> dict:
                 parsed["year_filter"] = val
                 continue
                 
-        # D. Displacement Parser (1.6, 2.0 etc)
-        # Regex-like check: digit + [.,] + digit
-        # We handle "1.6" "2,0"
-        if len(token) <= 4 and ('.' in token or ',' in token):
-            try:
-                # Normalize 2,0 -> 2.0
-                norm = token.replace(',', '.')
-                # Check if it casts to float
-                float(norm) 
-                # Also verify it looks like an engine size (e.g. 0.8 to 8.0)
-                # Avoid matching weird version numbers if any
-                parsed["engine_filter"] = norm # Keep as string for DB matching if column is text, or float if numeric.
-                # DB 'engine_disp_l' is numeric or string? Assuming match exact value or string.
-                # Usually engine_disp_l in DB might be "1.6", let's assume direct match.
-                continue
-            except:
-                pass
+        # D. Displacement Parser (1.6, 2.0, 2l, 2.0l etc)
+        # Regex-like check: digit + [.,] + digit OR digit + 'l'
+        # We handle "1.6", "2,0", "2l", "2.0l"
+        token_lower = token.lower()
+        if len(token) <= 5: # Small enough
+             # Strip 'l' if present at end
+             is_liter = False
+             if token_lower.endswith('l'):
+                 token_clean = token_lower[:-1]
+                 is_liter = True
+             else:
+                 token_clean = token_lower
+
+             # Check format
+             if any(c in token_clean for c in ['.', ',']) or is_liter or token_clean.isdigit():
+                 try:
+                     norm = token_clean.replace(',', '.')
+                     # Check if float
+                     val_float = float(norm)
+                     
+                     # If it was just an integer "2" or "2l", make it "2.0"
+                     # Logic: if no dot in norm, append .0
+                     if '.' not in norm:
+                         norm += ".0"
+                     
+                     # Verify reasonable engine range (0.5 to 16.0)
+                     if 0.5 <= val_float <= 16.0:
+                         parsed["engine_filter"] = norm
+                         continue
+                 except:
+                     pass
                 
         # E. Fallback: Text Token
         parsed["text_tokens"].append(token)
@@ -424,14 +438,15 @@ async def webhook(payload: MetaWebhookPayload):
                             elif len(vehicles) > 10:
                                 # Check if single brand
                                 unique_brands = list(set([v['brand_car'] for v in vehicles]))
+                                unique_models = list(set([v['model'] for v in vehicles]))
                                 
-                                if len(unique_brands) == 1:
-                                    # List unique models
-                                    unique_models = list(set([v['model'] for v in vehicles]))
+                                if len(unique_brands) == 1 and len(unique_models) > 1:
+                                    # List unique models only if we have variety
                                     models_str = "\n".join([f"• {m}" for m in unique_models[:8]]) # Limit list
                                     reply = f"🖐 Encontré muchos **{unique_brands[0]}**. Por favor escribí el modelo:\n\n{models_str}\n\n..."
                                 else:
-                                    reply = f"🖐 Encontré {len(vehicles)}+ vehículos. Por favor agregá el año o motor (ej: 1.6)."
+                                    # Mixed brands OR Single brand but only 1 model -> Need more specific info (Engine/Year)
+                                    reply = f"🖐 Encontré {len(vehicles)}+ vehículos. Por favor agregá el año o motor (ej: 1.6 o 2015)."
                                 
                                 await reply_and_mirror(chat_id, reply)
 
