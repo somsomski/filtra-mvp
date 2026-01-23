@@ -79,7 +79,7 @@ SYNONYMS = {
     's-10': 's10', 's 10': 's10'
 }
 
-NUMERIC_MODEL_WHITELIST = ['206', '207', '208', '306', '307', '308', '405', '408', '504', '505', '2008', '3008', '5008', '500', 'f100', 'f150', 'ram1500', 'ram2500']
+NUMERIC_MODEL_WHITELIST = ['206', '207', '208', '306', '307', '308', '405', '408', '504', '505', '3008', '5008', '500', 'f100', 'f150', 'ram1500', 'ram2500']
 
 def parse_search_query(text: str) -> dict:
     """
@@ -173,9 +173,18 @@ async def search_vehicle(query_data: dict, limit: int = 12):
     # 1. Technical Filters
     if query_data.get("year_filter"):
         y = query_data["year_filter"]
-        # Logic: year_from <= y AND (year_to >= y OR year_to IS NULL)
-        # Supabase Python SDK chaining:
-        query = query.lte('year_from', y).or_(f"year_to.gte.{y},year_to.is.null")
+        # Logic: (year_from <= y AND (year_to >= y OR year_to IS NULL)) OR model ilike %y%
+        # We construct a raw OR filter for the entire year logic block
+        # Supabase syntax: "and(year_from.lte.y,or(year_to.gte.y,year_to.is.null)),model.ilike.%y%"
+        # Actually, to combine complex AND/OR groups in PostgREST is tricky with the py wrapper's simple methods.
+        # But we can use the `or_` method on the top level with the raw string syntax.
+        # The condition we want is: condition_year_range OR condition_model_name
+        
+        # condition_year_range = and(year_from.lte.Y,or(year_to.gte.Y,year_to.is.null))
+        # condition_model_name = model.ilike.*Y*
+        
+        raw_filter = f"and(year_from.lte.{y},or(year_to.gte.{y},year_to.is.null)),model.ilike.*{y}*"
+        query = query.or_(raw_filter)
         
     if query_data.get("engine_filter"):
         # Assuming engine_disp_l is the column. 
@@ -446,7 +455,7 @@ async def webhook(payload: MetaWebhookPayload):
                                     reply = f"🖐 Encontré muchos **{unique_brands[0]}**. Por favor escribí el modelo:\n\n{models_str}\n\n..."
                                 else:
                                     # Mixed brands OR Single brand but only 1 model -> Need more specific info (Engine/Year)
-                                    reply = f"🖐 Encontré {len(vehicles)}+ vehículos. Por favor agregá el año o motor (ej: 1.6 o 2015)."
+                                    reply = f"🖐 Encontré muchos vehículos. Por favor escribí **Modelo + Año** (ej: *Hilux 2015*)."
                                 
                                 await reply_and_mirror(chat_id, reply)
 
