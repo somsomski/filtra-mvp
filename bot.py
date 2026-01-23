@@ -635,6 +635,18 @@ async def webhook(payload: MetaWebhookPayload):
                             msg_body += f"{label}\n" + "\n".join(found_parts[k]) + "\n\n"
                     
                     if not found_parts: msg_body += "⚠️ Sin filtros cargados.\n"
+                    
+                    # Add Mechanic/Pro Tech Info (Engine Series/Code)
+                    # UX: Subtle footer
+                    eng_code = vehicle.get('engine_code')
+                    eng_series = vehicle.get('engine_series')
+                    
+                    if eng_code or eng_series:
+                        tech_info = []
+                        if eng_series: tech_info.append(f"Serie: {eng_series}")
+                        if eng_code: tech_info.append(f"Motor: {eng_code}")
+                        
+                        msg_body += f"\n🔧 {' | '.join(tech_info)}"
 
                     # 3 Action Buttons
                     buttons = [
