@@ -217,6 +217,109 @@ async def search_vehicle(query_data: dict, limit: int = 12):
     res = query.limit(limit).execute()
     return res.data
 
+async def process_search_request(chat_id: str, text_body: str, status: str):
+    """
+    Centralized Search Handler used by Text inputs and List selections.
+    """
+    try:
+        # 1. Parse
+        q_data = parse_search_query(text_body)
+        
+        # 2. Execute
+        vehicles = await search_vehicle(q_data, limit=15)
+        
+        # 3. Handle Results
+        
+        # A. 0 Results
+        if not vehicles:
+            if status == 'menu_mode':
+                await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback:** {text_body}", is_alert=True)
+                await reply_and_mirror(chat_id, "✅ Gracias. Mensaje recibido, lo revisaremos.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
+                supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+            else:
+                reply = f"🤔 No encontré '{text_body}'.\n💡 Consejo: Probá 'Gol 1.6' o 'Hilux 2015'."
+                buttons = [
+                    {"id": "btn_human_help", "title": "🙋‍♂️ Ayuda / Error"},
+                    {"id": "btn_search_error", "title": "🔙 Probar de nuevo"}
+                ]
+                await reply_and_mirror(chat_id, reply, buttons=buttons)
+        
+        # B. Too Many Results (>10)
+        elif len(vehicles) > 10:
+            unique_brands = list(set([v['brand_car'] for v in vehicles]))
+            unique_models = sorted(list(set([v['model'] for v in vehicles])))
+            
+            # CASE A: Single Brand, Multi Model (Intermediate Selector)
+            if len(unique_brands) == 1 and len(unique_models) > 1:
+                
+                # If small list (2-10 items), send INTERACTIVE LIST
+                if 2 <= len(unique_models) <= 10:
+                    list_rows = []
+                    brand = unique_brands[0]
+                    for m in unique_models:
+                        # ID format: cmd_search_Brand Model
+                        # Limit title to 24 chars
+                        list_rows.append({
+                            "id": f"cmd_search_{brand} {m}",
+                            "title": m[:24],
+                            "description": "Ver versiones"
+                        })
+                    
+                    await reply_and_mirror(
+                        chat_id, 
+                        f"Encontré modelos de {brand}. Seleccioná uno:", 
+                        list_rows=list_rows, 
+                        list_title="Modelos"
+                    )
+                else:
+                    # Too many models (>10), fall back to text list
+                    models_str = "\n".join([f"• {m}" for m in unique_models[:8]])
+                    reply = f"🖐 Encontré muchos **{unique_brands[0]}**. Por favor escribí el modelo:\n\n{models_str}\n\n..."
+                    await reply_and_mirror(chat_id, reply)
+
+            # CASE B: Single Brand, Single Model (Refinement Loop check)
+            # CASE C: Mixed Brands
+            else:
+                reply = f"🖐 Encontré muchos vehículos. Por favor escribí **Modelo + Año** (ej: *Hilux 2015*)."
+                await reply_and_mirror(chat_id, reply)
+
+        # C. Good Range (1-10)
+        else:
+            list_rows = []
+            for v in vehicles:
+                parts_title = []
+                if v.get('engine_disp_l'): parts_title.append(f"{v['engine_disp_l']}L")
+                if v.get('power_hp'): parts_title.append(f"{v['power_hp']}CV")
+                if v.get('engine_valves'): parts_title.append(str(v['engine_valves']))
+                if v.get('fuel_type') == 'Diesel': parts_title.append("Diesel")
+                
+                title_str = " ".join(parts_title) or "Motor Desconocido"
+                
+                desc_parts = [
+                    v.get('brand_car'), v.get('model'), 
+                    v.get('series_suffix'), v.get('body_type')
+                ]
+                main_desc = " ".join([s for s in desc_parts if s])
+                y_to = str(v['year_to']) if v['year_to'] else 'Pres'
+                full_desc = f"{main_desc} • {v['year_from']}-{y_to}"
+                
+                list_rows.append({
+                    "id": str(v['vehicle_id']),
+                    "title": title_str[:24],
+                    "description": full_desc[:72]
+                })
+            
+            await reply_and_mirror(
+                chat_id,
+                f"Encontré {len(vehicles)} opciones. Seleccioná motor:",
+                list_rows=list_rows,
+                list_title="Motores"
+            )
+
+    except Exception as e:
+        print(f"Process Search Error: {e}")
+        send_whatsapp_message(chat_id, "⚠️ Error en motor de búsqueda.")
+
 # --- Helper for Context-Aware Navigation ---
 async def send_car_actions(phone: str, vehicle_id: str):
     """
@@ -421,96 +524,26 @@ async def webhook(payload: MetaWebhookPayload):
                     if text_body.lower() in stop_words_greetings:
                         await reply_and_mirror(chat_id, WELCOME_TEXT)
                     else:
-                        # --- SEARCH ENGINE V2 ---
-                        try:
-                            # 1. Parse
-                            q_data = parse_search_query(text_body)
-                            
-                            # 2. Execute
-                            vehicles = await search_vehicle(q_data, limit=15) # Slightly higher limit to check count
-                            
-                            # 3. Handle Results
-                            
-                            # A. 0 Results
-                            if not vehicles:
-                                if status == 'menu_mode':
-                                    # Treat as Feedback
-                                    await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback:** {text_body}", is_alert=True)
-                                    await reply_and_mirror(chat_id, "✅ Gracias. Mensaje recibido, lo revisaremos.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
-                                    supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
-                                else:
-                                    reply = f"🤔 No encontré '{text_body}'.\n💡 Consejo: Probá 'Gol 1.6' o 'Hilux 2015'."
-                                    buttons = [
-                                        {"id": "btn_human_help", "title": "🙋‍♂️ Ayuda / Error"},
-                                        {"id": "btn_search_error", "title": "🔙 Probar de nuevo"}
-                                    ]
-                                    await reply_and_mirror(chat_id, reply, buttons=buttons)
-                            
-                            # B. Too Many Results (>10)
-                            elif len(vehicles) > 10:
-                                # Check if single brand
-                                unique_brands = list(set([v['brand_car'] for v in vehicles]))
-                                unique_models = list(set([v['model'] for v in vehicles]))
-                                
-                                if len(unique_brands) == 1 and len(unique_models) > 1:
-                                    # List unique models only if we have variety
-                                    models_str = "\n".join([f"• {m}" for m in unique_models[:8]]) # Limit list
-                                    reply = f"🖐 Encontré muchos **{unique_brands[0]}**. Por favor escribí el modelo:\n\n{models_str}\n\n..."
-                                else:
-                                    # Mixed brands OR Single brand but only 1 model -> Need more specific info (Engine/Year)
-                                    reply = f"🖐 Encontré muchos vehículos. Por favor escribí **Modelo + Año** (ej: *Hilux 2015*)."
-                                
-                                await reply_and_mirror(chat_id, reply)
-
-                            # C. Good Range (1-10)
-                            else:
-                                list_rows = []
-                                for v in vehicles:
-                                    # Create Title
-                                    parts_title = []
-                                    if v.get('engine_disp_l'): parts_title.append(f"{v['engine_disp_l']}L")
-                                    if v.get('power_hp'): parts_title.append(f"{v['power_hp']}CV")
-                                    if v.get('engine_valves'): parts_title.append(str(v['engine_valves']))
-                                    if v.get('fuel_type') == 'Diesel': parts_title.append("Diesel")
-                                    
-                                    title_str = " ".join(parts_title) or "Motor Desconocido"
-                                    
-                                    # Create Desc
-                                    desc_parts = [
-                                        v.get('brand_car'), v.get('model'), 
-                                        v.get('series_suffix'), v.get('body_type')
-                                    ]
-                                    main_desc = " ".join([s for s in desc_parts if s])
-                                    y_to = str(v['year_to']) if v['year_to'] else 'Pres'
-                                    full_desc = f"{main_desc} • {v['year_from']}-{y_to}"
-                                    
-                                    list_rows.append({
-                                        "id": str(v['vehicle_id']),
-                                        "title": title_str[:24],
-                                        "description": full_desc[:72]
-                                    })
-                                
-                                await reply_and_mirror(
-                                    chat_id,
-                                    f"Encontré {len(vehicles)} opciones. Seleccioná motor:",
-                                    list_rows=list_rows,
-                                    list_title="Motores"
-                                )
-
-                        except Exception as e:
-                            print(f"Search V2 Error: {e}")
-                            if status == 'menu_mode':
-                                # Failed search in menu mode -> Likely complex feedback
-                                await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback (Error Trigger):** {text_body}", is_alert=True)
-                                await reply_and_mirror(chat_id, "✅ Mensaje recibido.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
-                                supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
-                            else:
-                                send_whatsapp_message(chat_id, "⚠️ Error en búsqueda.")
+                        # --- SEARCH ENGINE V2 (Refactored) ---
+                        await process_search_request(chat_id, text_body, status)
 
                 # B. Vehicle Card (List Selection)
                 elif msg_type == 'interactive' and msg['interactive']['type'] == 'list_reply':
                     vid = msg['interactive']['list_reply']['id']
                     
+                    # Check if it's a "Search Command" (Model Selector)
+                    if vid.startswith("cmd_search_"):
+                        # Extract query (e.g., "Toyota Hilux")
+                        # Format: "cmd_search_Brand Model"
+                        new_query = vid.replace("cmd_search_", "")
+                        
+                        # Log click
+                        await telegram_crm.send_log_to_admin(chat_id, f"👆 List Selection: {new_query}", is_alert=False)
+                        
+                        # Treat as text search
+                        await process_search_request(chat_id, new_query, status)
+                        continue
+
                     # Fetch Vehicle
                     v_res = supabase.table("vehicle").select("*").eq("vehicle_id", vid).single().execute()
                     vehicle = v_res.data
