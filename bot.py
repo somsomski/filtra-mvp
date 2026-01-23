@@ -302,21 +302,47 @@ async def process_search_request(chat_id: str, text_body: str, status: str):
         else:
             list_rows = []
             for v in vehicles:
-                parts_title = []
-                if v.get('engine_disp_l'): parts_title.append(f"{v['engine_disp_l']}L")
-                if v.get('power_hp'): parts_title.append(f"{v['power_hp']}CV")
-                if v.get('engine_valves'): parts_title.append(str(v['engine_valves']))
-                if v.get('fuel_type') == 'Diesel': parts_title.append("Diesel")
+                # 1. Fuel Badge Logic
+                f_raw = (v.get('fuel_type') or '').lower()
+                if 'diesel' in f_raw:
+                    fuel_badge = "🛢️ Diesel"
+                elif 'gnc' in f_raw or 'gas' in f_raw:
+                    fuel_badge = "🔥 GNC"
+                elif 'nafta' in f_raw or 'benz' in f_raw:
+                    fuel_badge = "⛽"
+                else:
+                    fuel_badge = ""
+
+                # 2. Build Title (Engine + HP + Valves + Fuel)
+                title_parts = []
+                if v.get('engine_disp_l'): 
+                    title_parts.append(f"{v['engine_disp_l']}L")
+                if v.get('power_hp'): 
+                    title_parts.append(f"{v['power_hp']}CV")
+                if v.get('engine_valves'):
+                    title_parts.append(str(v['engine_valves']))
                 
-                title_str = " ".join(parts_title) or "Motor Desconocido"
+                # Append Fuel priority (after engine specs)
+                if fuel_badge:
+                    title_parts.append(fuel_badge)
+
+                title_str = " ".join(title_parts) 
+                if not title_str.strip():
+                    title_str = "Ver Detalles" # Fallback
+                
+                # 3. Description (Brand Model • Year • Suffix)
+                # Body type explicitly excluded per requirements
+                y_to = str(v['year_to']) if v.get('year_to') else 'Pres'
+                year_str = f"{v.get('year_from')}-{y_to}" if v.get('year_from') else ""
                 
                 desc_parts = [
-                    v.get('brand_car'), v.get('model'), 
-                    v.get('series_suffix'), v.get('body_type')
+                    v.get('brand_car'), 
+                    v.get('model'), 
+                    year_str, 
+                    v.get('series_suffix')
                 ]
-                main_desc = " ".join([s for s in desc_parts if s])
-                y_to = str(v['year_to']) if v['year_to'] else 'Pres'
-                full_desc = f"{main_desc} • {v['year_from']}-{y_to}"
+                # Filter empty and join
+                full_desc = " • ".join([str(p) for p in desc_parts if p])
                 
                 list_rows.append({
                     "id": str(v['vehicle_id']),
