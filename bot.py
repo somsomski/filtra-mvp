@@ -68,6 +68,129 @@ def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict
         supabase.table("logs").insert(data).execute()
     except Exception as e:
         print(f"[Analytics Error] {e}")
+# --- Search Engine V2 ---
+STOP_WORDS = ['quiero', 'busco', 'necesito', 'para', 'el', 'la', 'un', 'una', 'auto', 'coche', 'camioneta', 'filtro', 'filtros', 'motor']
+
+SYNONYMS = {
+    'vw': 'volkswagen', 'volks': 'volkswagen',
+    'chevy': 'chevrolet',
+    'mb': 'mercedes-benz', 'mercedes': 'mercedes-benz',
+    'citroen': 'citroën',
+    's-10': 's10', 's 10': 's10'
+}
+
+NUMERIC_MODEL_WHITELIST = ['206', '207', '208', '306', '307', '308', '405', '408', '504', '505', '2008', '3008', '5008', '500', 'f100', 'f150', 'ram1500', 'ram2500']
+
+def parse_search_query(text: str) -> dict:
+    """
+    Parses unstructured text into structured search data (Year, Engine, Text Tokens).
+    Example: "Toyota Hilux 3.0 2010" -> year=2010, engine=3.0, tokens=['toyota', 'hilux']
+    """
+    if not text: return {}
+    
+    # 1. Sanitize & Normalize
+    # Remove stand-alone input like " - " but verify if it acts as a separator
+    # For simplicity, we assume comma removal was done in webhook, but we do it here too just in case.
+    clean_text = text.lower().replace(',', '').replace('(', '').replace(')', '').replace("'", "")
+    
+    # Handle synonyms (Rough replace)
+    for k, v in SYNONYMS.items():
+        # Using simple replace might be dangerous for short words, but 'vw' -> 'volkswagen' is usually safe.
+        # Ideally token-based replacement, but this suffices for MVP.
+        clean_text = clean_text.replace(k, v)
+        
+    tokens = clean_text.split()
+    
+    parsed = {
+        "text_tokens": [],
+        "year_filter": None,
+        "engine_filter": None
+    }
+    
+    for token in tokens:
+        # A. Stop Words
+        if token in STOP_WORDS:
+            continue
+            
+        # B. Numeric Model Whitelist (Protection)
+        if token in NUMERIC_MODEL_WHITELIST:
+            parsed["text_tokens"].append(token)
+            continue
+            
+        # C. Year Parser (1950-2030)
+        # Check if 4 digits
+        if token.isdigit() and len(token) == 4:
+            val = int(token)
+            if 1950 <= val <= 2030:
+                parsed["year_filter"] = val
+                continue
+                
+        # D. Displacement Parser (1.6, 2.0 etc)
+        # Regex-like check: digit + [.,] + digit
+        # We handle "1.6" "2,0"
+        if len(token) <= 4 and ('.' in token or ',' in token):
+            try:
+                # Normalize 2,0 -> 2.0
+                norm = token.replace(',', '.')
+                # Check if it casts to float
+                float(norm) 
+                # Also verify it looks like an engine size (e.g. 0.8 to 8.0)
+                # Avoid matching weird version numbers if any
+                parsed["engine_filter"] = norm # Keep as string for DB matching if column is text, or float if numeric.
+                # DB 'engine_disp_l' is numeric or string? Assuming match exact value or string.
+                # Usually engine_disp_l in DB might be "1.6", let's assume direct match.
+                continue
+            except:
+                pass
+                
+        # E. Fallback: Text Token
+        parsed["text_tokens"].append(token)
+        
+    return parsed
+
+async def search_vehicle(query_data: dict, limit: int = 12):
+    """
+    Executes the dynamic Supabase query.
+    """
+    if not supabase: return []
+    
+    query = supabase.table("vehicle").select("vehicle_id, brand_car, model, series_suffix, body_type, fuel_type, year_from, year_to, engine_disp_l, power_hp, engine_valves")
+    
+    # 1. Technical Filters
+    if query_data.get("year_filter"):
+        y = query_data["year_filter"]
+        # Logic: year_from <= y AND (year_to >= y OR year_to IS NULL)
+        # Supabase Python SDK chaining:
+        query = query.lte('year_from', y).or_(f"year_to.gte.{y},year_to.is.null")
+        
+    if query_data.get("engine_filter"):
+        # Assuming engine_disp_l is the column. 
+        # Note: input might be "1.6" text, db might be numeric 1.6. 
+        # .eq() usually handles auto-casting if flexible.
+        query = query.eq('engine_disp_l', query_data["engine_filter"])
+        
+    # 2. Text Search Everywhere
+    # For EACH token, it must match AT LEAST ONE of the target columns (.or_ logic per token)
+    # But we want AND logic between tokens (Toyota AND Hilux).
+    # So we chain .or_() filters for each token? 
+    # Wait. Supabase .or_() applies to the whole query scope if not careful.
+    # To do (ColA ilike %T1% OR ColB ilike %T1%) AND (ColA ilike %T2% OR ColB ilike %T2%):
+    # We just chain multiple .or_() clauses. Supabase treats chained filters as AND.
+    
+    target_cols = [
+        "brand_car", "model", "series_suffix", 
+        "engine_code", "engine_series", 
+        "body_type", "fuel_type", "engine_valves"
+    ]
+    
+    for token in query_data.get("text_tokens", []):
+        # Build the OR string: "col1.ilike.%tok%,col2.ilike.%tok%,..."
+        or_conditions = ",".join([f"{col}.ilike.%{token}%" for col in target_cols])
+        query = query.or_(or_conditions)
+        
+    res = query.limit(limit).execute()
+    return res.data
+
 # --- Helper for Context-Aware Navigation ---
 async def send_car_actions(phone: str, vehicle_id: str):
     """
@@ -263,43 +386,56 @@ async def webhook(payload: MetaWebhookPayload):
                     # Sanitize for SQL/Supabase filter to prevent syntax errors
                     search_term = text_body.replace(',', '').replace('(', '').replace(')', '').replace("'", "")
                     
+                    LOG_TAG = f"🔍 Buscó: {text_body}"
                     # Silent Mirroring to Telegram
-                    await telegram_crm.send_log_to_admin(chat_id, f"🔍 Buscó: {text_body}", is_alert=False)
+                    await telegram_crm.send_log_to_admin(chat_id, LOG_TAG, is_alert=False)
                     
                     # Check "Hola" logic or Stop Words if desired, but "Search Logic" is main focus
-                    stop_words = ['hola', 'start', 'hi', 'hello', 'menú', 'menu']
-                    if text_body.lower() in stop_words:
+                    stop_words_greetings = ['hola', 'start', 'hi', 'hello', 'menú', 'menu']
+                    if text_body.lower() in stop_words_greetings:
                         await reply_and_mirror(chat_id, WELCOME_TEXT)
                     else:
-                        # Search DB
+                        # --- SEARCH ENGINE V2 ---
                         try:
-                            res = supabase.table("vehicle").select("vehicle_id, brand_car, model, series_suffix, body_type, fuel_type, year_from, year_to, engine_disp_l, power_hp, engine_valves")\
-                                .or_(f"brand_car.ilike.%{search_term}%,model.ilike.%{search_term}%")\
-                                .limit(12).execute()
+                            # 1. Parse
+                            q_data = parse_search_query(text_body)
                             
-                            vehicles = res.data
-
-                            # 0 Results
+                            # 2. Execute
+                            vehicles = await search_vehicle(q_data, limit=15) # Slightly higher limit to check count
+                            
+                            # 3. Handle Results
+                            
+                            # A. 0 Results
                             if not vehicles:
                                 if status == 'menu_mode':
                                     # Treat as Feedback
                                     await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback:** {text_body}", is_alert=True)
                                     await reply_and_mirror(chat_id, "✅ Gracias. Mensaje recibido, lo revisaremos.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
-                                    # Reset to bot
                                     supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                                 else:
-                                    reply = f"🤔 No encontré '{text_body}'. ¿No aparece o es un error?"
+                                    reply = f"🤔 No encontré '{text_body}'.\n💡 Consejo: Probá 'Gol 1.6' o 'Hilux 2015'."
                                     buttons = [
                                         {"id": "btn_human_help", "title": "🙋‍♂️ Ayuda / Error"},
-                                        {"id": "btn_search_error", "title": "🔙 No, error mio"}
+                                        {"id": "btn_search_error", "title": "🔙 Probar de nuevo"}
                                     ]
                                     await reply_and_mirror(chat_id, reply, buttons=buttons)
                             
-                            # >10 Results
+                            # B. Too Many Results (>10)
                             elif len(vehicles) > 10:
-                                await reply_and_mirror(chat_id, f"🖐 Encontré demasiados ({len(vehicles)}+). Sé más específico (ej: agregar motor o año).")
+                                # Check if single brand
+                                unique_brands = list(set([v['brand_car'] for v in vehicles]))
+                                
+                                if len(unique_brands) == 1:
+                                    # List unique models
+                                    unique_models = list(set([v['model'] for v in vehicles]))
+                                    models_str = "\n".join([f"• {m}" for m in unique_models[:8]]) # Limit list
+                                    reply = f"🖐 Encontré muchos **{unique_brands[0]}**. Por favor escribí el modelo:\n\n{models_str}\n\n..."
+                                else:
+                                    reply = f"🖐 Encontré {len(vehicles)}+ vehículos. Por favor agregá el año o motor (ej: 1.6)."
+                                
+                                await reply_and_mirror(chat_id, reply)
 
-                            # 1-10 Results
+                            # C. Good Range (1-10)
                             else:
                                 list_rows = []
                                 for v in vehicles:
@@ -329,13 +465,13 @@ async def webhook(payload: MetaWebhookPayload):
                                 
                                 await reply_and_mirror(
                                     chat_id,
-                                    "Seleccioná tu versión exacta:",
+                                    f"Encontré {len(vehicles)} opciones. Seleccioná motor:",
                                     list_rows=list_rows,
-                                    list_title="Resultados"
+                                    list_title="Motores"
                                 )
 
                         except Exception as e:
-                            print(f"Search Error: {e}")
+                            print(f"Search V2 Error: {e}")
                             if status == 'menu_mode':
                                 # Failed search in menu mode -> Likely complex feedback
                                 await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback (Error Trigger):** {text_body}", is_alert=True)
