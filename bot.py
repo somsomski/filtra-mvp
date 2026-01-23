@@ -1,5 +1,6 @@
 import os
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Query, Response
@@ -89,9 +90,11 @@ def parse_search_query(text: str) -> dict:
     if not text: return {}
     
     # 1. Sanitize & Normalize
+    # Pre-process: Converts "1,6" to "1.6" via regex so the sanitizer doesn't destroy it.
+    text_pre = re.sub(r'(\d+),(\d+)', r'\1.\2', text.lower())
+    
     # Remove stand-alone input like " - " but verify if it acts as a separator
-    # For simplicity, we assume comma removal was done in webhook, but we do it here too just in case.
-    clean_text = text.lower().replace(',', '').replace('(', '').replace(')', '').replace("'", "")
+    clean_text = text_pre.replace(',', '').replace('(', '').replace(')', '').replace("'", "")
     
     # Handle synonyms (Rough replace)
     for k, v in SYNONYMS.items():
