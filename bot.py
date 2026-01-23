@@ -224,22 +224,19 @@ async def search_vehicle(query_data: dict, limit: int = 12):
         # Sanitize token for SQL/Regex safety
         safe_token = token.replace("'", "").replace("%", "")
         
+        # Calculate accent-insensitive regex for ALL tokens first
+        # Example: "mio" -> "m[ií]o"
+        fuzzy_token = to_accent_regex(safe_token)
+        
         if len(safe_token) > 3:
             # LONG TOKENS: Accent-Insensitive Regex Search
             # Example: "Megane" -> matches "Megane", "Mégane"
-            # We use 'imatch' which is a case-insensitive regex match (partial by default in Postgres regex?)
-            # Wait, Postgres regex 'text ~ pattern' looks for pattern anywhere in text.
-            # So "m[ií]o" matches "Clio Mío".
-            
-            fuzzy_token = to_accent_regex(safe_token)
             or_conditions = ",".join([f"{col}.imatch.{fuzzy_token}" for col in target_cols])
             query = query.or_(or_conditions)
         else:
             # SHORT TOKENS: Strict Search (Word Boundary) -> \ytoken\y
-            # Example: "I" -> Matches "Golf I", but NOT "Golf III" or "GTI"
-            # We use 'imatch' for case-insensitive regex.
-            # Python escape for \y is \\y (produces \y in string).
-            regex_pattern = f"\\y{safe_token}\\y"
+            # Example: "Mio" -> "\ym[ií]o\y" matches "Clio Mío" but NOT "Kamion"
+            regex_pattern = f"\\y{fuzzy_token}\\y"
             
             # PostgREST syntax: col.imatch.pattern
             or_conditions = ",".join([f"{col}.imatch.{regex_pattern}" for col in target_cols])
