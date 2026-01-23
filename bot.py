@@ -343,16 +343,20 @@ async def process_search_request(chat_id: str, text_body: str, status: str):
                 if not title_str.strip():
                     title_str = "Ver Detalles" # Fallback
                 
-                # 3. Description (Brand Model • Year • Suffix)
+                # 3. Description (Brand Model Suffix • Year)
                 # Body type explicitly excluded per requirements
                 y_to = str(v['year_to']) if v.get('year_to') else 'Pres'
                 year_str = f"{v.get('year_from')}-{y_to}" if v.get('year_from') else ""
                 
+                # Merge Model + Suffix
+                model_full = v.get('model', '')
+                if v.get('series_suffix'):
+                    model_full += f" {v['series_suffix']}"
+                
                 desc_parts = [
                     v.get('brand_car'), 
-                    v.get('model'), 
-                    year_str, 
-                    v.get('series_suffix')
+                    model_full,
+                    year_str
                 ]
                 # Filter empty and join
                 full_desc = " • ".join([str(p) for p in desc_parts if p])
