@@ -291,7 +291,7 @@ async def process_search_request(chat_id: str, text_body: str, status: str):
         # A. 0 Results
         if not vehicles:
             if status == 'menu_mode':
-                await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback:** {text_body}", is_alert=True)
+                await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback:** {text_body}", priority='high')
                 await reply_and_mirror(chat_id, "✅ Gracias. Mensaje recibido, lo revisaremos.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
                 supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
             else:
@@ -470,7 +470,7 @@ async def reply_and_mirror(phone: str, text: str, buttons: list = None, list_row
             mirror_msg += f"\n📋 *Mostró Lista:* {len(list_rows)} ítems"
 
         # 3. Send to Telegram
-        await telegram_crm.send_log_to_admin(phone, mirror_msg, is_alert=False)
+        await telegram_crm.send_log_to_admin(phone, mirror_msg, priority='log')
     except Exception as e:
         print(f"Telegram Mirror Error: {e}")
 
@@ -545,7 +545,7 @@ async def webhook(payload: MetaWebhookPayload):
                             supabase.table("users").update({"status": "bot", "last_active_at": now.isoformat()}).eq("phone", chat_id).execute()
                             user['status'] = 'bot' # Update local var
                             # Log to CRM
-                            await telegram_crm.send_log_to_admin(chat_id, "ℹ️ Sesión expirada. Bot reactivado.", is_alert=False)
+                            await telegram_crm.send_log_to_admin(chat_id, "ℹ️ Sesión expirada. Bot reactivado.", priority='log')
                     except Exception as e:
                         print(f"Time check error: {e}")
 
@@ -570,7 +570,7 @@ async def webhook(payload: MetaWebhookPayload):
                             # SWITCH TO BOT
                             supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                             await reply_and_mirror(chat_id, WELCOME_TEXT)
-                            await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot.", is_alert=False)
+                            await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot.", priority='log')
                             continue
                 
                 
@@ -580,7 +580,7 @@ async def webhook(payload: MetaWebhookPayload):
                     # Switch back to bot
                     supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                     await reply_and_mirror(chat_id, WELCOME_TEXT)
-                    await telegram_crm.send_log_to_admin(chat_id, f"🔄 User detected keyword '{text_body}'. Bot Active.", is_alert=False)
+                    await telegram_crm.send_log_to_admin(chat_id, f"🔄 User detected keyword '{text_body}'. Bot Active.", priority='log')
                     # Stop processing
                     continue
                 else:
@@ -684,7 +684,7 @@ async def webhook(payload: MetaWebhookPayload):
                     
                     LOG_TAG = f"🔍 Buscó: {text_body}"
                     # Silent Mirroring to Telegram
-                    await telegram_crm.send_log_to_admin(chat_id, LOG_TAG, is_alert=False)
+                    await telegram_crm.send_log_to_admin(chat_id, LOG_TAG, priority='log')
                     
                     # Check "Hola" logic or Stop Words if desired, but "Search Logic" is main focus
                     stop_words_greetings = ['hola', 'start', 'hi', 'hello', 'menú', 'menu']
@@ -705,7 +705,7 @@ async def webhook(payload: MetaWebhookPayload):
                         new_query = vid.replace("cmd_search_", "")
                         
                         # Log click
-                        await telegram_crm.send_log_to_admin(chat_id, f"👆 List Selection: {new_query}", is_alert=False)
+                        await telegram_crm.send_log_to_admin(chat_id, f"👆 List Selection: {new_query}", priority='log')
                         
                         # Treat as text search
                         await process_search_request(chat_id, new_query, status)
@@ -720,7 +720,7 @@ async def webhook(payload: MetaWebhookPayload):
                     sel_brand = vehicle.get('brand_car', '')
                     sel_model = vehicle.get('model', '')
                     sel_year = f"{vehicle.get('year_from', '?')}-{vehicle.get('year_to') or 'Pres'}"
-                    await telegram_crm.send_log_to_admin(chat_id, f"👆 Seleccionó: {sel_brand} {sel_model} ({sel_year})", is_alert=False)
+                    await telegram_crm.send_log_to_admin(chat_id, f"👆 Seleccionó: {sel_brand} {sel_model} ({sel_year})", priority='log')
 
                     # Fetch Parts
                     parts_res = supabase.table("vehicle_part").select("role, part(brand_filter, part_code, part_type)").eq("vehicle_id", vid).execute()
@@ -769,20 +769,20 @@ async def webhook(payload: MetaWebhookPayload):
                 elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
                     btn_id = msg['interactive']['button_reply']['id']
                     btn_title = msg['interactive']['button_reply']['title']
-                    await telegram_crm.send_log_to_admin(chat_id, f"👆 Click: {btn_title}", is_alert=False)
+                    await telegram_crm.send_log_to_admin(chat_id, f"👆 Click: {btn_title}", priority='log')
                     
                     # 1. Human Help Request (No Result)
                     if btn_id == 'btn_human_help':
                         # Set human, alert admin
                         supabase.table("users").update({"status": "human"}).eq("phone", chat_id).execute()
-                        await telegram_crm.send_log_to_admin(chat_id, "🚨 **Help Request**: User requested assistance.", is_alert=True)
+                        await telegram_crm.send_log_to_admin(chat_id, "🚨 **Help Request**: User requested assistance.", priority='high')
                         await reply_and_mirror(chat_id, "✅ Ticket creado. Te contestaré en breve.", buttons=[{"id": "btn_return_bot", "title": "🤖 Volver al Bot"}])
                     
                     # 1b. Return to Bot (Exit Human Mode)
                     elif btn_id == 'btn_return_bot':
                          supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                          await reply_and_mirror(chat_id, WELCOME_TEXT)
-                         await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot via Button.", is_alert=False)
+                         await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot via Button.", priority='log')
 
                     # 2. Search Error / Back
                     elif btn_id == 'btn_search_error':
