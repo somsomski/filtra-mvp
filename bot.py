@@ -26,10 +26,10 @@ else:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 WELCOME_TEXT = (
-    "👋 **¡Hola! Soy FiltraBot.**\n\n"
-    "🔍 Encontrá el filtro exacto en segundos.\n"
-    "⚙️ Consultá stock y precios en tu zona.\n\n"
-    "👇 **Escribí el modelo de tu auto para empezar:**\n"
+    "👋 **¡Hola! Soy FiltraBot (Beta).** 🇦🇷\n\n"
+    "🔍 Buscador de filtros y repuestos.\n"
+    "🚧 **Estamos construyendo la base:** Cargamos catálogos nuevos todos los días. Si no encontrás algo, ¡avisanos!\n\n"
+    "👇 **Escribí el modelo para probar:**\n"
     "_(ej: Gol Trend 1.6 o Amarok 2015)_"
 )
 
@@ -640,7 +640,7 @@ async def webhook(payload: MetaWebhookPayload):
                     await telegram_crm.update_topic_title(chat_id, 'bot', 'mechanic')
                     await telegram_crm.send_log_to_admin(chat_id, f"👨‍🔧 Mechanic Registered: {input_val}", priority='high')
                     
-                    await reply_and_mirror(chat_id, "✅ Registro Provisorio OK. Te avisaremos cuando habilitemos tu cuenta.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuesto"}])
+                    await reply_and_mirror(chat_id, "✅ **¡Perfil Guardado!**\n\nGracias por sumarte a la Beta. Estamos conectando los primeros talleres con proveedores. Te avisaremos apenas activemos tu cuenta PRO.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuesto"}])
                     continue
 
             # B. Seller Flow
@@ -689,7 +689,7 @@ async def webhook(payload: MetaWebhookPayload):
                     await telegram_crm.update_topic_title(chat_id, 'bot', 'seller')
                     await telegram_crm.send_log_to_admin(chat_id, f"🏪 Seller Registered: {logistics_val}", priority='high')
                     
-                    await reply_and_mirror(chat_id, "✅ Gracias. Te contactaremos para validar tu cuenta.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuesto"}])
+                    await reply_and_mirror(chat_id, "✅ **¡Datos Recibidos!**\n\nEstamos armando la red de distribución. Te contactaremos personalmente para validar tu zona y empezar a derivarte pedidos.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuesto"}])
                     continue
 
             # C. Buyer Flow
@@ -728,7 +728,7 @@ async def webhook(payload: MetaWebhookPayload):
                     else:
                         await telegram_crm.send_log_to_admin(chat_id, f"💸 Buyer Inquiry: {input_val}", priority='normal')
 
-                    await reply_and_mirror(chat_id, f"{tag} Solicitud enviada. Buscando proveedores en tu zona...", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
+                    await reply_and_mirror(chat_id, f"{tag} **¡Pedido Recibido!**\n\nComo estamos en **Fase Beta**, un especialista de nuestra red revisará tu pedido manualmente y te contactará con opciones reales en breve.\n\n🏎️ ¡Gracias por ayudarnos a mejorar!", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
                     continue
 
             # --- BOT MODE (Standard & Menu) ---
@@ -848,7 +848,7 @@ async def webhook(payload: MetaWebhookPayload):
                     elif btn_id == 'btn_search_error':
                         # Reset status to bot just in case
                         supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
-                        await reply_and_mirror(chat_id, WELCOME_TEXT)
+                        await reply_and_mirror(chat_id, SHORT_WELCOME)
 
                     # 3. Dónde comprar
                     elif btn_id.startswith('btn_buy_loc'):
