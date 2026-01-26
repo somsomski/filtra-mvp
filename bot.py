@@ -592,7 +592,7 @@ async def webhook(payload: MetaWebhookPayload):
                     # STOP here
                     continue
 
-            # --- SMART SURVEYS (Fixed Logic) ---
+            # --- SMART SURVEYS (Polished Logic) ---
             
             input_val = get_message_content(msg).strip()
             
@@ -679,12 +679,13 @@ async def webhook(payload: MetaWebhookPayload):
                     }).eq("phone", chat_id).execute()
                     
                     # Ask Urgency WITH CANCEL
+                    # Updated Copy: "⏳ Para buscar mejor precio..."
                     btns = [
                         {"id": "btn_urgency_high", "title": "🔥 URGENTE"},
                         {"id": "btn_urgency_normal", "title": "💸 Cotizar / Mañana"},
                         {"id": "btn_cancel_survey", "title": "🔙 Cancelar"}
                     ]
-                    await reply_and_mirror(chat_id, "⏳ Última: ¿Qué urgencia tenés?", buttons=btns)
+                    await reply_and_mirror(chat_id, "⏳ Para buscar mejor precio o rapidez: ¿Qué urgencia tenés?\n_(Seleccioná o escribí)_", buttons=btns)
                     continue
 
             elif status == 'waiting_buyer_urgency':
@@ -858,14 +859,17 @@ async def webhook(payload: MetaWebhookPayload):
                         supabase.table("users").update({"status": "waiting_mechanic_priority"}).eq("phone", chat_id).execute()
                         btns = [
                             {"id": "btn_prio_speed", "title": "🚀 Velocidad"},
-                            {"id": "btn_prio_price", "title": "💰 Precio"}
+                            {"id": "btn_prio_price", "title": "💰 Precio"},
+                            {"id": "btn_cancel_survey", "title": "🔙 Cancelar"}
                         ]
-                        await reply_and_mirror(chat_id, "👨‍🔧 Taller PRO: ¿Qué priorizás más?", buttons=btns)
+                        await reply_and_mirror(chat_id, "🚀 Para optimizar tu perfil: ¿Qué priorizás habitualmente?\n_(Seleccioná o escribí tu respuesta)_", buttons=btns)
 
                     # START SELLER FLOW
                     elif btn_id == 'btn_is_seller':
                          supabase.table("users").update({"status": "waiting_seller_location"}).eq("phone", chat_id).execute()
-                         await reply_and_mirror(chat_id, "🏪 Alta Vendedor: ¿En qué Ciudad/Zona operás?")
+                         # Ask Location with Cancel
+                         btns = [{"id": "btn_cancel_survey", "title": "🔙 Cancelar"}]
+                         await reply_and_mirror(chat_id, "🏪 Alta Vendedor: ¿En qué Ciudad o Zona está tu depósito?\n_(Escribí tu ubicación)_", buttons=btns)
 
 
 
