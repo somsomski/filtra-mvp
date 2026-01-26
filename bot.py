@@ -592,9 +592,23 @@ async def webhook(payload: MetaWebhookPayload):
                     # STOP here
                     continue
 
-            # --- SMART SURVEYS (New States) ---
+            # --- SMART SURVEYS (Fixed Logic) ---
             
             input_val = get_message_content(msg).strip()
+            
+            # 1. Global Cancel Check
+            # Check keywords or explicit cancel button
+            is_cancel_btn = (msg_type == 'interactive' and 
+                             msg.get('interactive', {}).get('button_reply', {}).get('id') == 'btn_cancel_survey')
+            
+            cancel_keywords = ['cancelar', 'salir', 'menu', 'basta', 'chau', 'volver']
+            
+            if (input_val.lower() in cancel_keywords) or is_cancel_btn:
+                # Reset to bot
+                supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                await telegram_crm.send_log_to_admin(chat_id, "🚫 User cancelled survey.", priority='log')
+                await reply_and_mirror(chat_id, "❌ Operación cancelada. ¿En qué te ayudo?", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuesto"}])
+                continue
 
             # A. Mechanic Flow
             if status == 'waiting_mechanic_priority':
@@ -603,14 +617,23 @@ async def webhook(payload: MetaWebhookPayload):
                     await update_user_metadata(chat_id, {"priority": priority_val})
                     
                     supabase.table("users").update({"status": "waiting_mechanic_name"}).eq("phone", chat_id).execute()
-                    await reply_and_mirror(chat_id, "📝 ¿Cuál es el nombre de tu Taller?")
+                    
+                    # Ask Name WITH CANCEL
+                    btns = [{"id": "btn_cancel_survey", "title": "🔙 Cancelar"}]
+                    await reply_and_mirror(chat_id, "📝 ¿Cuál es el nombre de tu Taller?", buttons=btns)
                     continue
 
             elif status == 'waiting_mechanic_name':
                 if input_val:
                     await update_user_metadata(chat_id, {"shop_name": input_val})
-                    # Finalize
-                    supabase.table("users").update({"status": "bot", "user_type": "mechanic"}).eq("phone", chat_id).execute()
+                    
+                    # Finalize & Update SQL Column 'name'
+                    supabase.table("users").update({
+                        "status": "bot", 
+                        "user_type": "mechanic",
+                        "name": input_val
+                    }).eq("phone", chat_id).execute()
+                    
                     await telegram_crm.update_topic_title(chat_id, 'bot', 'mechanic')
                     await telegram_crm.send_log_to_admin(chat_id, f"👨‍🔧 Mechanic Registered: {input_val}", priority='high')
                     
@@ -622,8 +645,15 @@ async def webhook(payload: MetaWebhookPayload):
                 if input_val:
                     await update_user_metadata(chat_id, {"location": input_val})
                     
-                    supabase.table("users").update({"status": "waiting_seller_logistics"}).eq("phone", chat_id).execute()
-                    await reply_and_mirror(chat_id, "🚚 ¿Hacés envíos? (Si/No/Radio...)")
+                    # Update Location Column immediately so we have it
+                    supabase.table("users").update({
+                        "status": "waiting_seller_logistics",
+                        "location": input_val
+                    }).eq("phone", chat_id).execute()
+                    
+                    # Ask Logistics WITH CANCEL
+                    btns = [{"id": "btn_cancel_survey", "title": "🔙 Cancelar"}]
+                    await reply_and_mirror(chat_id, "🚚 ¿Hacés envíos? (Si/No/Radio...)", buttons=btns)
                     continue
             
             elif status == 'waiting_seller_logistics':
@@ -642,12 +672,17 @@ async def webhook(payload: MetaWebhookPayload):
                 if input_val:
                     # Save location to column AND metadata
                     await update_user_metadata(chat_id, {"location": input_val})
-                    supabase.table("users").update({"location": input_val, "status": "waiting_buyer_urgency"}).eq("phone", chat_id).execute()
                     
-                    # Ask Urgency
+                    supabase.table("users").update({
+                        "location": input_val, 
+                        "status": "waiting_buyer_urgency"
+                    }).eq("phone", chat_id).execute()
+                    
+                    # Ask Urgency WITH CANCEL
                     btns = [
                         {"id": "btn_urgency_high", "title": "🔥 URGENTE"},
-                        {"id": "btn_urgency_normal", "title": "💸 Cotizar / Mañana"}
+                        {"id": "btn_urgency_normal", "title": "💸 Cotizar / Mañana"},
+                        {"id": "btn_cancel_survey", "title": "🔙 Cancelar"}
                     ]
                     await reply_and_mirror(chat_id, "⏳ Última: ¿Qué urgencia tenés?", buttons=btns)
                     continue
