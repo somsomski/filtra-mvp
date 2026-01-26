@@ -26,11 +26,14 @@ else:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 WELCOME_TEXT = (
-    "👋 *Hola! Soy FiltraBot.*\n"
-    "Tu buscador de filtros al instante. 🇦🇷\n\n"
-    "👇 *Escribí el modelo de tu auto:*\n"
-    "(ej: Gol Trend 1.6)"
+    "👋 **¡Hola! Soy FiltraBot.**\n\n"
+    "🔍 Encontrá el filtro exacto en segundos.\n"
+    "⚙️ Consultá stock y precios en tu zona.\n\n"
+    "👇 **Escribí el modelo de tu auto para empezar:**\n"
+    "_(ej: Gol Trend 1.6 o Amarok 2015)_"
 )
+
+SHORT_WELCOME = "✅ Listo. Escribí el modelo (ej: *Gol 1.6* o *Hilux 2015*) para buscar."
 
 # --- Lifespan for Telegram Polling ---
 @asynccontextmanager
@@ -544,7 +547,7 @@ async def webhook(payload: MetaWebhookPayload):
                             # Reset to bot
                             supabase.table("users").update({"status": "bot", "last_active_at": now.isoformat()}).eq("phone", chat_id).execute()
                             user['status'] = 'bot' # Update local var
-                            # Log to CRM
+                            # Log to CRM (Silent/Log priority, no user alert needed)
                             await telegram_crm.send_log_to_admin(chat_id, "ℹ️ Sesión expirada. Bot reactivado.", priority='log')
                     except Exception as e:
                         print(f"Time check error: {e}")
@@ -592,7 +595,7 @@ async def webhook(payload: MetaWebhookPayload):
                     # STOP here
                     continue
 
-            # --- SMART SURVEYS (Polished Logic) ---
+            # --- SMART SURVEYS (Refined Logic) ---
             
             input_val = get_message_content(msg).strip()
             
@@ -607,7 +610,7 @@ async def webhook(payload: MetaWebhookPayload):
                 # Reset to bot
                 supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                 await telegram_crm.send_log_to_admin(chat_id, "🚫 User cancelled survey.", priority='log')
-                await reply_and_mirror(chat_id, "❌ Operación cancelada. ¿En qué te ayudo?", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuesto"}])
+                await reply_and_mirror(chat_id, SHORT_WELCOME, buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuesto"}])
                 continue
 
             # A. Mechanic Flow
@@ -641,28 +644,50 @@ async def webhook(payload: MetaWebhookPayload):
                     continue
 
             # B. Seller Flow
+            elif status == 'waiting_seller_name':
+                if input_val:
+                    # Save Name
+                    await update_user_metadata(chat_id, {"shop_name": input_val})
+                    # Update SQL Column 'name', move to Location
+                    supabase.table("users").update({
+                        "status": "waiting_seller_location",
+                        "name": input_val
+                    }).eq("phone", chat_id).execute()
+                    
+                    # Ask Location
+                    btns = [{"id": "btn_cancel_survey", "title": "🔙 Cancelar"}]
+                    await reply_and_mirror(chat_id, "🏪 Alta Vendedor: ¿En qué Ciudad o Zona está tu depósito?\n_(Escribí tu ubicación)_", buttons=btns)
+                    continue
+
             elif status == 'waiting_seller_location':
                 if input_val:
                     await update_user_metadata(chat_id, {"location": input_val})
                     
-                    # Update Location Column immediately so we have it
+                    # Update Location Column
                     supabase.table("users").update({
                         "status": "waiting_seller_logistics",
                         "location": input_val
                     }).eq("phone", chat_id).execute()
                     
-                    # Ask Logistics WITH CANCEL
-                    btns = [{"id": "btn_cancel_survey", "title": "🔙 Cancelar"}]
-                    await reply_and_mirror(chat_id, "🚚 ¿Hacés envíos? (Si/No/Radio...)", buttons=btns)
+                    # Ask Logistics (Buttons)
+                    btns = [
+                        {"id": "btn_logistics_ship", "title": "📦 Hago Envíos"},
+                        {"id": "btn_logistics_pickup", "title": "🏪 Solo Retiro"},
+                        {"id": "btn_cancel_survey", "title": "🔙 Cancelar"}
+                    ]
+                    await reply_and_mirror(chat_id, "🚚 ¿Hacés envíos?", buttons=btns)
                     continue
             
             elif status == 'waiting_seller_logistics':
                 if input_val:
-                    await update_user_metadata(chat_id, {"logistics": input_val})
+                    # Input is button title
+                    logistics_val = 'envios' if 'envíos' in input_val.lower() else 'retiro'
+                    
+                    await update_user_metadata(chat_id, {"logistics": logistics_val})
                     # Finalize
                     supabase.table("users").update({"status": "bot", "user_type": "seller"}).eq("phone", chat_id).execute()
                     await telegram_crm.update_topic_title(chat_id, 'bot', 'seller')
-                    await telegram_crm.send_log_to_admin(chat_id, f"🏪 Seller Registered: {input_val}", priority='high')
+                    await telegram_crm.send_log_to_admin(chat_id, f"🏪 Seller Registered: {logistics_val}", priority='high')
                     
                     await reply_and_mirror(chat_id, "✅ Gracias. Te contactaremos para validar tu cuenta.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuesto"}])
                     continue
@@ -678,28 +703,27 @@ async def webhook(payload: MetaWebhookPayload):
                         "status": "waiting_buyer_urgency"
                     }).eq("phone", chat_id).execute()
                     
-                    # Ask Urgency WITH CANCEL
-                    # Updated Copy: "⏳ Para buscar mejor precio..."
+                    # Ask Urgency (Refined Copy & Buttons)
                     btns = [
-                        {"id": "btn_urgency_high", "title": "🔥 URGENTE"},
-                        {"id": "btn_urgency_normal", "title": "💸 Cotizar / Mañana"},
+                        {"id": "btn_urgency_high", "title": "🔥 Lo necesito YA"},
+                        {"id": "btn_urgency_normal", "title": "💰 Busco Precio"},
                         {"id": "btn_cancel_survey", "title": "🔙 Cancelar"}
                     ]
-                    await reply_and_mirror(chat_id, "⏳ Para buscar mejor precio o rapidez: ¿Qué urgencia tenés?\n_(Seleccioná o escribí)_", buttons=btns)
+                    await reply_and_mirror(chat_id, "⏳ Para filtrar opciones: ¿Buscás el mejor PRECIO o necesitás el repuesto YA (Cerca)?", buttons=btns)
                     continue
 
             elif status == 'waiting_buyer_urgency':
                 if input_val:
-                    is_urgent = 'urgent' in input_val.lower() or 'fuego' in input_val.lower() or 'fire' in input_val.lower() or '🔥' in input_val
-                    priority_level = 'high' if is_urgent else 'normal'
-                    tag = "🔥" if is_urgent else "💸"
+                    # "Lo necesito YA" vs "Busco Precio"
+                    is_urgent = 'ya' in input_val.lower() or 'fuego' in input_val.lower() or '🔥' in input_val
                     
                     await update_user_metadata(chat_id, {"urgency": input_val})
                     supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                     
+                    tag = "🔥" if is_urgent else "💸"
+                    
                     # Alert actions
                     if is_urgent:
-                        # "Set Title to 🔥" -> We can't easily change strict icon, but we utilize high priority log
                         await telegram_crm.send_log_to_admin(chat_id, f"🔥 Buyer Urgency: {input_val}", priority='high')
                     else:
                         await telegram_crm.send_log_to_admin(chat_id, f"💸 Buyer Inquiry: {input_val}", priority='normal')
@@ -817,7 +841,7 @@ async def webhook(payload: MetaWebhookPayload):
                     # 1b. Return to Bot (Exit Human Mode)
                     elif btn_id == 'btn_return_bot':
                          supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
-                         await reply_and_mirror(chat_id, WELCOME_TEXT)
+                         await reply_and_mirror(chat_id, SHORT_WELCOME)
                          await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot via Button.", priority='log')
 
                     # 2. Search Error / Back
@@ -866,10 +890,10 @@ async def webhook(payload: MetaWebhookPayload):
 
                     # START SELLER FLOW
                     elif btn_id == 'btn_is_seller':
-                         supabase.table("users").update({"status": "waiting_seller_location"}).eq("phone", chat_id).execute()
-                         # Ask Location with Cancel
+                         supabase.table("users").update({"status": "waiting_seller_name"}).eq("phone", chat_id).execute()
+                         # Ask Name (Step 1)
                          btns = [{"id": "btn_cancel_survey", "title": "🔙 Cancelar"}]
-                         await reply_and_mirror(chat_id, "🏪 Alta Vendedor: ¿En qué Ciudad o Zona está tu depósito?\n_(Escribí tu ubicación)_", buttons=btns)
+                         await reply_and_mirror(chat_id, "🏪 Alta de Vendedor: ¿Cómo se llama tu Negocio/Repuestera?", buttons=btns)
 
 
 
