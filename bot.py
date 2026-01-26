@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI):
     bot, dp = await telegram_crm.start_telegram()
     
     # Run polling in background
+    # We use asyncio.create_task to run it without blocking FastAPI
     polling_task = asyncio.create_task(dp.start_polling(bot))
     
     yield
@@ -56,7 +57,7 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI
 app = FastAPI(lifespan=lifespan)
 
-# --- Analytics / DB Helpers ---
+# --- Analytics Helper (Updated) ---
 def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict] = None):
     if not supabase: return
     try:
@@ -98,7 +99,6 @@ def get_message_content(msg: dict) -> str:
         elif itype == 'list_reply':
             return msg['interactive']['list_reply']['title']
     return ""
-
 # --- Search Engine V2 ---
 STOP_WORDS = ['quiero', 'busco', 'necesito', 'para', 'el', 'la', 'un', 'una', 'auto', 'coche', 'camioneta', 'filtro', 'filtros', 'motor']
 
@@ -113,29 +113,57 @@ SYNONYMS = {
 NUMERIC_MODEL_WHITELIST = ['206', '207', '208', '306', '307', '308', '405', '408', '504', '505', '3008', '5008', '500', 'f100', 'f150', 'ram1500', 'ram2500']
 
 def parse_search_query(text: str) -> dict:
+    """
+    Parses unstructured text into structured search data (Year, Engine, Text Tokens).
+    Example: "Toyota Hilux 3.0 2010" -> year=2010, engine=3.0, tokens=['toyota', 'hilux']
+    """
     if not text: return {}
+    
+    # 1. Sanitize & Normalize
+    # Pre-process: Converts "1,6" to "1.6" via regex so the sanitizer doesn't destroy it.
     text_pre = re.sub(r'(\d+),(\d+)', r'\1.\2', text.lower())
+    
+    # Remove stand-alone input like " - " but verify if it acts as a separator
     clean_text = text_pre.replace(',', '').replace('(', '').replace(')', '').replace("'", "")
+    
+    # Handle synonyms (Rough replace)
     for k, v in SYNONYMS.items():
+        # Using simple replace might be dangerous for short words, but 'vw' -> 'volkswagen' is usually safe.
+        # Ideally token-based replacement, but this suffices for MVP.
         clean_text = clean_text.replace(k, v)
         
     tokens = clean_text.split()
-    parsed = {"text_tokens": [], "year_filter": None, "engine_filter": None}
+    
+    parsed = {
+        "text_tokens": [],
+        "year_filter": None,
+        "engine_filter": None
+    }
     
     for token in tokens:
-        if token in STOP_WORDS: continue
+        # A. Stop Words
+        if token in STOP_WORDS:
+            continue
+            
+        # B. Numeric Model Whitelist (Protection)
         if token in NUMERIC_MODEL_WHITELIST:
             parsed["text_tokens"].append(token)
             continue
             
+        # C. Year Parser (1950-2030)
+        # Check if 4 digits
         if token.isdigit() and len(token) == 4:
             val = int(token)
             if 1950 <= val <= 2030:
                 parsed["year_filter"] = val
                 continue
                 
+        # D. Displacement Parser (1.6, 2.0, 2l, 2.0l etc)
+        # Regex-like check: digit + [.,] + digit OR digit + 'l'
+        # We handle "1.6", "2,0", "2l", "2.0l"
         token_lower = token.lower()
-        if len(token) <= 5:
+        if len(token) <= 5: # Small enough
+             # Strip 'l' if present at end
              is_liter = False
              if token_lower.endswith('l'):
                  token_clean = token_lower[:-1]
@@ -143,58 +171,127 @@ def parse_search_query(text: str) -> dict:
              else:
                  token_clean = token_lower
 
+             # Check format
              if any(c in token_clean for c in ['.', ',']) or is_liter or token_clean.isdigit():
                  try:
                      norm = token_clean.replace(',', '.')
+                     # Check if float
                      val_float = float(norm)
-                     if '.' not in norm: norm += ".0"
+                     
+                     # If it was just an integer "2" or "2l", make it "2.0"
+                     # Logic: if no dot in norm, append .0
+                     if '.' not in norm:
+                         norm += ".0"
+                     
+                     # Verify reasonable engine range (0.5 to 16.0)
                      if 0.5 <= val_float <= 16.0:
                          parsed["engine_filter"] = norm
                          continue
                  except:
                      pass
+                
+        # E. Fallback: Text Token
         parsed["text_tokens"].append(token)
+        
     return parsed
 
 def to_accent_regex(text: str) -> str:
-    mapping = {'a': '[aá]', 'e': '[eé]', 'i': '[ií]', 'o': '[oó]', 'u': '[uúü]', 'n': '[nñ]'}
+    """
+    Converts text to accent-insensitive regex pattern.
+    Example: "mio" -> "m[ií]o"
+    """
+    mapping = {
+        'a': '[aá]', 'e': '[eé]', 'i': '[ií]', 'o': '[oó]', 'u': '[uúü]', 
+        'n': '[nñ]'
+    }
     return "".join([mapping.get(c, c) for c in text])
 
 async def search_vehicle(query_data: dict, limit: int = 12):
+    """
+    Executes the dynamic Supabase query.
+    """
     if not supabase: return []
-    query = supabase.table("vehicle").select("vehicle_id, brand_car, model, series_suffix, body_type, fuel_type, year_from, year_to, engine_disp_l, power_hp, engine_valves, metadata")
     
+    query = supabase.table("vehicle").select("vehicle_id, brand_car, model, series_suffix, body_type, fuel_type, year_from, year_to, engine_disp_l, power_hp, engine_valves")
+    
+    # 1. Technical Filters
     if query_data.get("year_filter"):
         y = query_data["year_filter"]
+        # Logic: (year_from <= y AND (year_to >= y OR year_to IS NULL)) OR model ilike %y%
+        # We construct a raw OR filter for the entire year logic block
+        # Supabase syntax: "and(year_from.lte.y,or(year_to.gte.y,year_to.is.null)),model.ilike.%y%"
+        # Actually, to combine complex AND/OR groups in PostgREST is tricky with the py wrapper's simple methods.
+        # But we can use the `or_` method on the top level with the raw string syntax.
+        # The condition we want is: condition_year_range OR condition_model_name
+        
+        # condition_year_range = and(year_from.lte.Y,or(year_to.gte.Y,year_to.is.null))
+        # condition_model_name = model.ilike.*Y*
+        
         raw_filter = f"and(year_from.lte.{y},or(year_to.gte.{y},year_to.is.null)),model.ilike.*{y}*"
         query = query.or_(raw_filter)
         
     if query_data.get("engine_filter"):
+        # Assuming engine_disp_l is the column. 
+        # Note: input might be "1.6" text, db might be numeric 1.6. 
+        # .eq() usually handles auto-casting if flexible.
         query = query.eq('engine_disp_l', query_data["engine_filter"])
         
-    target_cols = ["brand_car", "model", "series_suffix", "engine_code", "engine_series", "body_type", "fuel_type", "engine_valves"]
+    # 2. Text Search Everywhere
+    # For EACH token, it must match AT LEAST ONE of the target columns (.or_ logic per token)
+    # But we want AND logic between tokens (Toyota AND Hilux).
+    # So we chain .or_() filters for each token? 
+    # Wait. Supabase .or_() applies to the whole query scope if not careful.
+    # To do (ColA ilike %T1% OR ColB ilike %T1%) AND (ColA ilike %T2% OR ColB ilike %T2%):
+    # We just chain multiple .or_() clauses. Supabase treats chained filters as AND.
+    
+    target_cols = [
+        "brand_car", "model", "series_suffix", 
+        "engine_code", "engine_series", 
+        "body_type", "fuel_type", "engine_valves"
+    ]
     
     for token in query_data.get("text_tokens", []):
+        # Sanitize token for SQL/Regex safety
         safe_token = token.replace("'", "").replace("%", "")
+        
+        # Calculate accent-insensitive regex for ALL tokens first
+        # Example: "mio" -> "m[ií]o"
         fuzzy_token = to_accent_regex(safe_token)
+        
         if len(safe_token) > 3:
+            # LONG TOKENS: Accent-Insensitive Regex Search
+            # Example: "Megane" -> matches "Megane", "Mégane"
             or_conditions = ",".join([f"{col}.imatch.{fuzzy_token}" for col in target_cols])
+            query = query.or_(or_conditions)
         else:
+            # SHORT TOKENS: Strict Search (Word Boundary) -> \ytoken\y
+            # Example: "Mio" -> "\ym[ií]o\y" matches "Clio Mío" but NOT "Kamion"
             regex_pattern = f"\\y{fuzzy_token}\\y"
+            
+            # PostgREST syntax: col.imatch.pattern
             or_conditions = ",".join([f"{col}.imatch.{regex_pattern}" for col in target_cols])
-        query = query.or_(or_conditions)
+            query = query.or_(or_conditions)
         
     res = query.limit(limit).execute()
     return res.data
 
 async def process_search_request(chat_id: str, text_body: str, status: str):
+    """
+    Centralized Search Handler used by Text inputs and List selections.
+    """
     try:
+        # 1. Parse
         q_data = parse_search_query(text_body)
+        
+        # 2. Execute
         vehicles = await search_vehicle(q_data, limit=15)
         
+        # 3. Handle Results
+        
+        # A. 0 Results
         if not vehicles:
             if status == 'menu_mode':
-                await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback:** {text_body}", priority='log')
+                await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback:** {text_body}", is_alert=True)
                 await reply_and_mirror(chat_id, "✅ Gracias. Mensaje recibido, lo revisaremos.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
                 supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
             else:
@@ -205,51 +302,93 @@ async def process_search_request(chat_id: str, text_body: str, status: str):
                 ]
                 await reply_and_mirror(chat_id, reply, buttons=buttons)
         
+        # B. Too Many Results (>10)
         elif len(vehicles) > 10:
             unique_brands = list(set([v['brand_car'] for v in vehicles]))
             unique_models = sorted(list(set([v['model'] for v in vehicles])))
             
+            # CASE A: Single Brand, Multi Model (Intermediate Selector)
             if len(unique_brands) == 1 and len(unique_models) > 1:
+                
+                # If small list (2-10 items), send INTERACTIVE LIST
                 if 2 <= len(unique_models) <= 10:
                     list_rows = []
                     brand = unique_brands[0]
                     for m in unique_models:
+                        # ID format: cmd_search_Brand Model
+                        # Limit title to 24 chars
                         list_rows.append({
                             "id": f"cmd_search_{brand} {m}",
                             "title": m[:24],
                             "description": "Ver versiones"
                         })
-                    await reply_and_mirror(chat_id, f"Encontré modelos de {brand}. Seleccioná uno:", list_rows=list_rows, list_title="Modelos")
+                    
+                    await reply_and_mirror(
+                        chat_id, 
+                        f"Encontré modelos de {brand}. Seleccioná uno:", 
+                        list_rows=list_rows, 
+                        list_title="Modelos"
+                    )
                 else:
+                    # Too many models (>10), fall back to text list
                     models_str = "\n".join([f"• {m}" for m in unique_models[:8]])
                     reply = f"🖐 Encontré muchos **{unique_brands[0]}**. Por favor escribí el modelo:\n\n{models_str}\n\n..."
                     await reply_and_mirror(chat_id, reply)
+
+            # CASE B: Single Brand, Single Model (Refinement Loop check)
+            # CASE C: Mixed Brands
             else:
                 reply = f"🖐 Encontré muchos vehículos. Por favor escribí **Modelo + Año** (ej: *Hilux 2015*)."
                 await reply_and_mirror(chat_id, reply)
 
-        else: # 1-10 Results
+        # C. Good Range (1-10)
+        else:
             list_rows = []
             for v in vehicles:
+                # 1. Fuel Badge Logic
                 f_raw = (v.get('fuel_type') or '').lower()
-                fuel_badge = "🛢️ Diesel" if 'diesel' in f_raw else ("🔥 GNC" if ('gnc' in f_raw or 'gas' in f_raw) else ("⛽" if ('content' in f_raw or 'nafta' in f_raw or 'benz' in f_raw) else ""))
-                
+                if 'diesel' in f_raw:
+                    fuel_badge = "🛢️ Diesel"
+                elif 'gnc' in f_raw or 'gas' in f_raw:
+                    fuel_badge = "🔥 GNC"
+                elif 'nafta' in f_raw or 'benz' in f_raw:
+                    fuel_badge = "⛽"
+                else:
+                    fuel_badge = ""
+
+                # 2. Build Title (Engine + HP + Valves + Fuel)
                 title_parts = []
-                if v.get('engine_disp_l'): title_parts.append(f"{v['engine_disp_l']}L")
-                if v.get('power_hp'): title_parts.append(f"{v['power_hp']}CV")
-                if v.get('engine_valves'): title_parts.append(str(v['engine_valves']))
-                if fuel_badge: title_parts.append(fuel_badge)
+                if v.get('engine_disp_l'): 
+                    title_parts.append(f"{v['engine_disp_l']}L")
+                if v.get('power_hp'): 
+                    title_parts.append(f"{v['power_hp']}CV")
+                if v.get('engine_valves'):
+                    title_parts.append(str(v['engine_valves']))
+                
+                # Append Fuel priority (after engine specs)
+                if fuel_badge:
+                    title_parts.append(fuel_badge)
 
                 title_str = " ".join(title_parts) 
-                if not title_str.strip(): title_str = "Ver Detalles"
+                if not title_str.strip():
+                    title_str = "Ver Detalles" # Fallback
                 
+                # 3. Description (Brand Model Suffix • Year)
+                # Body type explicitly excluded per requirements
                 y_to = str(v['year_to']) if v.get('year_to') else 'Pres'
                 year_str = f"{v.get('year_from')}-{y_to}" if v.get('year_from') else ""
                 
+                # Merge Model + Suffix
                 model_full = v.get('model', '')
-                if v.get('series_suffix'): model_full += f" {v['series_suffix']}"
+                if v.get('series_suffix'):
+                    model_full += f" {v['series_suffix']}"
                 
-                desc_parts = [v.get('brand_car'), model_full, year_str]
+                desc_parts = [
+                    v.get('brand_car'), 
+                    model_full,
+                    year_str
+                ]
+                # Filter empty and join
                 full_desc = " • ".join([str(p) for p in desc_parts if p])
                 
                 list_rows.append({
@@ -258,19 +397,30 @@ async def process_search_request(chat_id: str, text_body: str, status: str):
                     "description": full_desc[:72]
                 })
             
-            await reply_and_mirror(chat_id, f"Encontré {len(vehicles)} opciones. Seleccioná motor:", list_rows=list_rows, list_title="Motores")
+            await reply_and_mirror(
+                chat_id,
+                f"Encontré {len(vehicles)} opciones. Seleccioná motor:",
+                list_rows=list_rows,
+                list_title="Motores"
+            )
 
     except Exception as e:
         print(f"Process Search Error: {e}")
         send_whatsapp_message(chat_id, "⚠️ Error en motor de búsqueda.")
 
-# --- Context-Aware Navigation ---
+# --- Helper for Context-Aware Navigation ---
 async def send_car_actions(phone: str, vehicle_id: str):
+    """
+    Restores the 3 main actions for a specific vehicle without resending the full card.
+    """
     try:
+        # Validate ID
         if not vehicle_id or not vehicle_id.isdigit():
+            # If invalid ID (e.g. legacy button), maybe just send a generic menu or "Search Again"
             await reply_and_mirror(phone, "⚠️ No pude recuperar el contexto. Por favor buscá de nuevo.")
             return
 
+        # Fetch minimal vehicle data for context
         v_res = supabase.table("vehicle").select("brand_car, model").eq("vehicle_id", vehicle_id).single().execute()
         v = v_res.data
         if not v:
@@ -278,19 +428,25 @@ async def send_car_actions(phone: str, vehicle_id: str):
             return
 
         text = f"🔙 Opciones para *{v.get('brand_car')} {v.get('model')}*:"
+        
         buttons = [
             {"id": f"btn_buy_loc_{vehicle_id}", "title": "📍 Dónde comprar"},
             {"id": f"btn_menu_mech_{vehicle_id}", "title": "⚙️ Menú / Taller"},
             {"id": "btn_search_error", "title": "🔍 Buscar otro"}
         ]
+        
         await reply_and_mirror(phone, text, buttons=buttons)
     except Exception as e:
         print(f"Send Car Actions Error: {e}")
         await reply_and_mirror(phone, "⚠️ Error interno recuperando menú.")
 
-# --- Response Wrapper ---
+# --- Unified Response Wrapper ---
 async def reply_and_mirror(phone: str, text: str, buttons: list = None, list_rows: list = None, list_title: str = None):
+    """
+    Sends to WhatsApp AND mirrors the exact content to Telegram.
+    """
     try:
+        # 1. Send to WhatsApp via services
         if buttons:
             send_interactive_buttons(phone, text, buttons)
         elif list_rows:
@@ -300,18 +456,24 @@ async def reply_and_mirror(phone: str, text: str, buttons: list = None, list_row
     except Exception as e:
         print(f"WhatsApp Send Error: {e}")
 
+    # 2. Construct Mirror Text for Telegram
     try:
+        # Use the EXACT 'text' variable passed above
         mirror_msg = f"🤖 Bot: {text}"
+        
+        # Append visual cues for interactive elements
         if buttons:
             btn_titles = " | ".join([f"[{b['title']}]" for b in buttons])
             mirror_msg += f"\n🔘 *Opciones:* {btn_titles}"
+        
         if list_rows:
             mirror_msg += f"\n📋 *Mostró Lista:* {len(list_rows)} ítems"
-        
-        # Mirror logs are usually low priority
-        await telegram_crm.send_log_to_admin(phone, mirror_msg, priority='log')
+
+        # 3. Send to Telegram
+        await telegram_crm.send_log_to_admin(phone, mirror_msg, is_alert=False)
     except Exception as e:
         print(f"Telegram Mirror Error: {e}")
+
 
 # --- Pydantic Models ---
 class MetaWebhookPayload(BaseModel):
@@ -320,7 +482,11 @@ class MetaWebhookPayload(BaseModel):
 
 # --- Webhook Verification ---
 @app.get("/webhook")
-async def verify_webhook(mode: str = Query(..., alias="hub.mode"), verify_token: str = Query(..., alias="hub.verify_token"), challenge: str = Query(..., alias="hub.challenge")):
+async def verify_webhook(
+    mode: str = Query(..., alias="hub.mode"),
+    verify_token: str = Query(..., alias="hub.verify_token"),
+    challenge: str = Query(..., alias="hub.challenge")
+):
     if mode == "subscribe" and verify_token == VERIFY_TOKEN:
         return Response(content=challenge, media_type="text/plain")
     raise HTTPException(status_code=403, detail="Verification failed")
@@ -328,26 +494,32 @@ async def verify_webhook(mode: str = Query(..., alias="hub.mode"), verify_token:
 # --- Main Logic ---
 @app.post("/webhook")
 async def webhook(payload: MetaWebhookPayload):
+    """
+    Main Hybrid Flow Logic
+    """
     for entry in payload.entry:
         for change in entry.get('changes', []):
             value = change.get('value', {})
             messages = value.get('messages', [])
             
-            if not messages: continue
+            if not messages:
+                continue
 
             msg = messages[0]
-            chat_id = msg['from']
+            chat_id = msg['from'] # Phone number
             user_name = value.get('contacts', [{}])[0].get('profile', {}).get('name', 'Unknown')
             msg_type = msg.get('type')
 
+            # 1. Get/Create User & Session Management
             if not supabase: continue
 
-            # 1. User & Session
             user_res = supabase.table("users").select("*").eq("phone", chat_id).maybe_single().execute()
             user = user_res.data if user_res else None
+            
             now = datetime.now(timezone.utc)
             
             if not user:
+                # Create new user
                 user = {
                     "phone": chat_id,
                     "name": user_name,
@@ -356,44 +528,68 @@ async def webhook(payload: MetaWebhookPayload):
                     "last_active_at": now.isoformat()
                 }
                 supabase.table("users").insert(user).execute()
+                # Also ensure topic exists just in case
                 await telegram_crm.get_or_create_topic(chat_id, user_name)
             else:
+                # Session Timeout Logic
                 last_active_str = user.get("last_active_at")
                 current_status = user.get("status", "bot")
+                
+                # Check timeout for Humans
                 if current_status == 'human' and last_active_str:
                     try:
+                        # Handle varied timestamp formats if needed, usually ISO from Supabase
                         last_active = datetime.fromisoformat(last_active_str.replace("Z", "+00:00"))
                         if (now - last_active) > timedelta(minutes=60):
+                            # Reset to bot
                             supabase.table("users").update({"status": "bot", "last_active_at": now.isoformat()}).eq("phone", chat_id).execute()
-                            user['status'] = 'bot'
-                            await telegram_crm.send_log_to_admin(chat_id, "ℹ️ Sesión expirada. Bot reactivado.", priority='log')
-                    except Exception as e: pass
+                            user['status'] = 'bot' # Update local var
+                            # Log to CRM
+                            await telegram_crm.send_log_to_admin(chat_id, "ℹ️ Sesión expirada. Bot reactivado.", is_alert=False)
+                    except Exception as e:
+                        print(f"Time check error: {e}")
+
+                # Update Last Active
                 supabase.table("users").update({"last_active_at": now.isoformat()}).eq("phone", chat_id).execute()
 
+            # Refresh local status
             status = user.get('status', 'bot')
 
             # 2. Hybrid Routing
             
             # --- HUMAN MODE ---
             if status == 'human':
-                text_body = get_message_content(msg)
+                text_body = ""
+                if msg_type == 'text':
+                    text_body = msg['text']['body']
+                elif msg_type == 'interactive':
+                    # Even buttons might be sent in human mode if they click old ones?
+                    # Or maybe "Return to Bot" button
+                    if msg['interactive']['type'] == 'button_reply':
+                        if msg['interactive']['button_reply']['id'] == 'btn_return_bot':
+                            # SWITCH TO BOT
+                            supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                            await reply_and_mirror(chat_id, WELCOME_TEXT)
+                            await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot.", is_alert=False)
+                            continue
+                
                 
                 # Check keywords to break out
                 keywords = ["menu", "start", "bot", "volver", "inicio"]
-                
-                # Check for Return Button specifically
-                is_return_btn = (msg_type == 'interactive' and msg.get('interactive', {}).get('button_reply', {}).get('id') == 'btn_return_bot')
-                
-                if (text_body and text_body.lower().strip() in keywords) or is_return_btn:
+                if text_body and text_body.lower().strip() in keywords:
+                    # Switch back to bot
                     supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
-                    await update_user_metadata(chat_id, {}) # Optional cleanup or keep metadata
                     await reply_and_mirror(chat_id, WELCOME_TEXT)
-                    await telegram_crm.send_log_to_admin(chat_id, f"🔄 User returned to Bot.", priority='normal')
-                    if not is_return_btn:
-                         await telegram_crm.update_topic_title(chat_id, 'bot', user.get('user_type', 'unknown'))
+                    await telegram_crm.send_log_to_admin(chat_id, f"🔄 User detected keyword '{text_body}'. Bot Active.", is_alert=False)
+                    # Stop processing
                     continue
                 else:
-                    await telegram_crm.send_log_to_admin(chat_id, f"📩 {text_body or '[Media]'}", priority='normal')
+                    # Just forward to Telegram
+                    if text_body:
+                        await telegram_crm.send_log_to_admin(chat_id, f"📩 {text_body}")
+                    else:
+                        await telegram_crm.send_log_to_admin(chat_id, f"📩 [Media/Other Message Type]")
+                    # STOP here
                     continue
 
             # --- SMART SURVEYS (New States) ---
@@ -475,8 +671,7 @@ async def webhook(payload: MetaWebhookPayload):
                     await reply_and_mirror(chat_id, f"{tag} Solicitud enviada. Buscando proveedores en tu zona...", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
                     continue
 
-
-            # --- BOT MODE (Standard) ---
+            # --- BOT MODE (Standard & Menu) ---
             if status in ['bot', 'menu_mode']:
                 
                 # A. Search Logic (Text)
@@ -484,41 +679,63 @@ async def webhook(payload: MetaWebhookPayload):
                     text_body = msg['text']['body'].strip()
                     log_to_db(chat_id, 'search_text', text_body, payload=msg)
                     
+                    # Sanitize for SQL/Supabase filter to prevent syntax errors
+                    search_term = text_body.replace(',', '').replace('(', '').replace(')', '').replace("'", "")
+                    
+                    LOG_TAG = f"🔍 Buscó: {text_body}"
+                    # Silent Mirroring to Telegram
+                    await telegram_crm.send_log_to_admin(chat_id, LOG_TAG, is_alert=False)
+                    
+                    # Check "Hola" logic or Stop Words if desired, but "Search Logic" is main focus
                     stop_words_greetings = ['hola', 'start', 'hi', 'hello', 'menú', 'menu']
                     if text_body.lower() in stop_words_greetings:
                         await reply_and_mirror(chat_id, WELCOME_TEXT)
                     else:
-                        search_term = text_body.replace(',', '').replace('(', '').replace(')', '').replace("'", "")
-                        await telegram_crm.send_log_to_admin(chat_id, f"🔍 Buscó: {text_body}", priority='log')
+                        # --- SEARCH ENGINE V2 (Refactored) ---
                         await process_search_request(chat_id, text_body, status)
 
-                # B. Interactive List Selection (Vehicle)
+                # B. Vehicle Card (List Selection)
                 elif msg_type == 'interactive' and msg['interactive']['type'] == 'list_reply':
                     vid = msg['interactive']['list_reply']['id']
                     
+                    # Check if it's a "Search Command" (Model Selector)
                     if vid.startswith("cmd_search_"):
+                        # Extract query (e.g., "Toyota Hilux")
+                        # Format: "cmd_search_Brand Model"
                         new_query = vid.replace("cmd_search_", "")
-                        await telegram_crm.send_log_to_admin(chat_id, f"👆 List Selection: {new_query}", priority='log')
+                        
+                        # Log click
+                        await telegram_crm.send_log_to_admin(chat_id, f"👆 List Selection: {new_query}", is_alert=False)
+                        
+                        # Treat as text search
                         await process_search_request(chat_id, new_query, status)
                         continue
 
                     # Fetch Vehicle
                     v_res = supabase.table("vehicle").select("*").eq("vehicle_id", vid).single().execute()
                     vehicle = v_res.data
-                    if not vehicle: continue
+                    if not vehicle: return
 
-                    sel_desc = f"{vehicle.get('brand_car')} {vehicle.get('model')}"
-                    await telegram_crm.send_log_to_admin(chat_id, f"👆 Selected: {sel_desc}", priority='log')
+                    # Log selection
+                    sel_brand = vehicle.get('brand_car', '')
+                    sel_model = vehicle.get('model', '')
+                    sel_year = f"{vehicle.get('year_from', '?')}-{vehicle.get('year_to') or 'Pres'}"
+                    await telegram_crm.send_log_to_admin(chat_id, f"👆 Seleccionó: {sel_brand} {sel_model} ({sel_year})", is_alert=False)
 
+                    # Fetch Parts
                     parts_res = supabase.table("vehicle_part").select("role, part(brand_filter, part_code, part_type)").eq("vehicle_id", vid).execute()
                     
-                    msg_body = f"🚗 **{sel_desc}**\n\n"
+                    # Build Message
+                    display_title = f"{vehicle.get('brand_car')} {vehicle.get('model')}"
+                    msg_body = f"🚗 **{display_title}**\n\n"
+                    
                     found_parts = {}
                     for item in parts_res.data:
                         part = item.get('part')
                         if part:
                             ptype = part.get('part_type', 'other').lower()
-                            line = f"• {part.get('brand_filter')}: {part.get('part_code')}"
+                            code = part.get('part_code', '').replace('*', '')
+                            line = f"• {part.get('brand_filter')}: {code}"
                             found_parts.setdefault(ptype, []).append(line)
                     
                     type_dic = {'oil': '🛢️ Aceite', 'air': '💨 Aire', 'cabin': '❄️ Habitáculo', 'fuel': '⛽ Combustible'}
@@ -528,17 +745,19 @@ async def webhook(payload: MetaWebhookPayload):
                     
                     if not found_parts: msg_body += "⚠️ Sin filtros cargados.\n"
                     
-                    # Tech Info Footer
-                    meta = vehicle.get('metadata') or {}
-                    if isinstance(meta, str):
-                        try: meta = json.loads(meta)
-                        except: meta = {}
-                    eng_code = meta.get('engine_code') or vehicle.get('engine_code')
-                    eng_series = meta.get('engine_series')
+                    # Add Mechanic/Pro Tech Info (Engine Series/Code)
+                    # UX: Subtle footer
+                    eng_code = vehicle.get('engine_code')
+                    eng_series = vehicle.get('engine_series')
+                    
                     if eng_code or eng_series:
-                        info = [s for s in [eng_series, eng_code] if s]
-                        msg_body += f"\n🔧 {' | '.join(info)}"
+                        tech_info = []
+                        if eng_series: tech_info.append(f"Serie: {eng_series}")
+                        if eng_code: tech_info.append(f"Motor: {eng_code}")
+                        
+                        msg_body += f"\n🔧 {' | '.join(tech_info)}"
 
+                    # 3 Action Buttons
                     buttons = [
                         {"id": f"btn_buy_loc_{vid}", "title": "📍 Dónde comprar"},
                         {"id": f"btn_menu_mech_{vid}", "title": "⚙️ Menú / Taller"},
@@ -550,29 +769,33 @@ async def webhook(payload: MetaWebhookPayload):
                 elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
                     btn_id = msg['interactive']['button_reply']['id']
                     btn_title = msg['interactive']['button_reply']['title']
-                    await telegram_crm.send_log_to_admin(chat_id, f"👆 Click: {btn_title}", priority='log')
-
+                    await telegram_crm.send_log_to_admin(chat_id, f"👆 Click: {btn_title}", is_alert=False)
+                    
+                    # 1. Human Help Request (No Result)
                     if btn_id == 'btn_human_help':
+                        # Set human, alert admin
                         supabase.table("users").update({"status": "human"}).eq("phone", chat_id).execute()
-                        await telegram_crm.send_log_to_admin(chat_id, "🚨 User requested Help.", priority='high')
-                        await telegram_crm.update_topic_title(chat_id, "human", user.get('user_type', 'unknown'))
+                        await telegram_crm.send_log_to_admin(chat_id, "🚨 **Help Request**: User requested assistance.", is_alert=True)
                         await reply_and_mirror(chat_id, "✅ Ticket creado. Te contestaré en breve.", buttons=[{"id": "btn_return_bot", "title": "🤖 Volver al Bot"}])
                     
+                    # 1b. Return to Bot (Exit Human Mode)
                     elif btn_id == 'btn_return_bot':
                          supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                          await reply_and_mirror(chat_id, WELCOME_TEXT)
-                         await telegram_crm.update_topic_title(chat_id, "bot", user.get('user_type', 'unknown'))
+                         await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot via Button.", is_alert=False)
 
+                    # 2. Search Error / Back
                     elif btn_id == 'btn_search_error':
+                        # Reset status to bot just in case
                         supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                         await reply_and_mirror(chat_id, WELCOME_TEXT)
 
-                    # START BUYER FLOW
+                    # 3. Dónde comprar
                     elif btn_id.startswith('btn_buy_loc'):
                         supabase.table("users").update({"status": "waiting_buyer_location"}).eq("phone", chat_id).execute()
                         await reply_and_mirror(chat_id, "📍 ¿De qué Barrio o Ciudad sos?")
                     
-                    # SELECTOR MENU
+                    # 4. Menú / Taller
                     elif btn_id.startswith('btn_menu_mech'):
                         supabase.table("users").update({"status": "menu_mode"}).eq("phone", chat_id).execute()
                         try:
@@ -608,5 +831,7 @@ async def webhook(payload: MetaWebhookPayload):
                     elif btn_id == 'btn_is_seller':
                          supabase.table("users").update({"status": "waiting_seller_location"}).eq("phone", chat_id).execute()
                          await reply_and_mirror(chat_id, "🏪 Alta Vendedor: ¿En qué Ciudad/Zona operás?")
+
+
 
     return {"status": "ok"}
