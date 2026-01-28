@@ -59,17 +59,37 @@ def get_all_vehicles():
                 y_from = str(x['year_from'])
                 y_to = str(x['year_to']) or 'Presente'
 
+            # Metadata Extraction
+            meta = x.get('metadata') or {}
+            if isinstance(meta, str):
+                import json
+                try:
+                    meta = json.loads(meta)
+                except:
+                    meta = {}
+            
+            # Prefer metadata, fallback to columns
+            eng_code = meta.get('engine_code') or x.get('engine_code')
+            eng_series = meta.get('engine_series')
+            
             # Construir partes opcionales
             suffix = f" {x['series_suffix']}" if x['series_suffix'] else ""
             disp = f" {x['engine_disp_l']}L" if x['engine_disp_l'] else ""
-            code = f" {x['engine_code']}" if x['engine_code'] else ""
+            
+            # Tech Badge
+            tech_parts = []
+            if eng_code: tech_parts.append(eng_code)
+            if eng_series: tech_parts.append(eng_series)
+            
+            tech_str = f" [{' | '.join(tech_parts)}]" if tech_parts else ""
+            
             try:
                 hp_val = int(float(x['power_hp']))
                 power = f" ({hp_val}HP)"
             except:
                 power = f" ({x['power_hp']}HP)" if x['power_hp'] else ""
             
-            return f"{x['model']}{suffix} ({y_from}-{y_to}){disp}{code}{power}"
+            return f"{x['model']}{suffix} ({y_from}-{y_to}){disp}{power}{tech_str}"
 
         df['version_str'] = df.apply(format_version, axis=1)
         return df

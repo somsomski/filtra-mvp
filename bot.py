@@ -824,42 +824,12 @@ async def webhook(payload: MetaWebhookPayload):
                         # Treat as text search
                         await process_search_request(chat_id, new_query, status)
                         continue
-                
-                # C. General Button Handlers
-                elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
-                    btn_id = msg['interactive']['button_reply']['id']
-
-                    # 1. Add Missing
-                    if btn_id.startswith("btn_add_missing_"):
-                        model_name = btn_id.split("btn_add_missing_")[1]
-                        
-                        await log_user_event(chat_id, "request_missing", model_name)
-                        await telegram_crm.send_log_to_admin(chat_id, f"📝 Request to ADD: {model_name}", priority='normal')
-                        
-                        await reply_and_mirror(chat_id, f"📝 ¡Anotado!\n\nYa le avisé al equipo. Voy a buscar los filtros de {model_name} y los cargo lo antes posible. ¡Gracias! 🚀")
-                        await send_whatsapp_message(chat_id, SHORT_WELCOME)
-                        continue
-
-                    # 2. Human Help
-                    elif btn_id == "btn_human_help":
-                        supabase.table("users").update({"status": "human"}).eq("phone", chat_id).execute()
-                        await telegram_crm.update_topic_title(chat_id, 'human', user.get('user_type', 'unknown'))
-                        
-                        await log_user_event(chat_id, "human_mode_req", "User requested support")
-                        await telegram_crm.send_log_to_admin(chat_id, "👤 User requested HUMAN support.", priority='high')
-                        
-                        await reply_and_mirror(chat_id, "👤 Modo Humano activado.\n\nDejanos tu consulta escrita acá abajo 👇 y te responderemos en cuanto estemos online.", buttons=[{"id": "btn_return_bot", "title": "🤖 Volver al Bot"}])
-                        continue
-
-                    # 3. Retry Search
-                    elif btn_id == "btn_search_retry":
-                        await send_whatsapp_message(chat_id, SHORT_WELCOME)
-                        continue
-
+                    
+                    # --- VEHICLE DETAILS ---
                     # Fetch Vehicle
                     v_res = supabase.table("vehicle").select("*").eq("vehicle_id", vid).single().execute()
                     vehicle = v_res.data
-                    if not vehicle: return
+                    if not vehicle: continue
 
                     # Log selection
                     sel_brand = vehicle.get('brand_car', '')
@@ -910,37 +880,54 @@ async def webhook(payload: MetaWebhookPayload):
                     ]
                     await reply_and_mirror(chat_id, msg_body, buttons=buttons)
 
-                # C. Button Handlers
+                # C. General Button Handlers
                 elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
                     btn_id = msg['interactive']['button_reply']['id']
                     btn_title = msg['interactive']['button_reply']['title']
+                    
                     await telegram_crm.send_log_to_admin(chat_id, f"👆 Click: {btn_title}", priority='log')
-                    
-                    # 1. Human Help Request (No Result)
-                    if btn_id == 'btn_human_help':
-                        # Set human, alert admin
+
+                    # 1. Add Missing
+                    if btn_id.startswith("btn_add_missing_"):
+                        model_name = btn_id.split("btn_add_missing_")[1]
+                        
+                        await log_user_event(chat_id, "request_missing", model_name)
+                        await telegram_crm.send_log_to_admin(chat_id, f"📝 Request to ADD: {model_name}", priority='normal')
+                        
+                        await reply_and_mirror(chat_id, f"📝 ¡Anotado!\n\nYa le avisé al equipo. Voy a buscar los filtros de {model_name} y los cargo lo antes posible. ¡Gracias! 🚀")
+                        await send_whatsapp_message(chat_id, SHORT_WELCOME)
+                        continue
+
+                    # 2. Human Help (Global & Fallback)
+                    elif btn_id == "btn_human_help":
                         supabase.table("users").update({"status": "human"}).eq("phone", chat_id).execute()
-                        await telegram_crm.send_log_to_admin(chat_id, "🚨 **Help Request**: User requested assistance.", priority='high')
-                        await reply_and_mirror(chat_id, "✅ Ticket creado. Te contestaré en breve.", buttons=[{"id": "btn_return_bot", "title": "🤖 Volver al Bot"}])
-                    
-                    # 1b. Return to Bot (Exit Human Mode)
+                        await telegram_crm.update_topic_title(chat_id, 'human', user.get('user_type', 'unknown'))
+                        
+                        await log_user_event(chat_id, "human_mode_req", "User requested support")
+                        await telegram_crm.send_log_to_admin(chat_id, "👤 User requested HUMAN support.", priority='high')
+                        
+                        await reply_and_mirror(chat_id, "👤 Modo Humano activado.\n\nDejanos tu consulta escrita acá abajo 👇 y te responderemos en cuanto estemos online.", buttons=[{"id": "btn_return_bot", "title": "🤖 Volver al Bot"}])
+                        continue
+
+                    # 2b. Return to Bot
                     elif btn_id == 'btn_return_bot':
                          supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                          await reply_and_mirror(chat_id, SHORT_WELCOME)
                          await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot via Button.", priority='log')
 
-                    # 2. Search Error / Back
-                    elif btn_id == 'btn_search_error':
-                        # Reset status to bot just in case
+                    # 3. Search Retry / Error
+                    elif btn_id == "btn_search_retry" or btn_id == "btn_search_error":
+                        await send_whatsapp_message(chat_id, SHORT_WELCOME)
+                        # Reset status
                         supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
-                        await reply_and_mirror(chat_id, SHORT_WELCOME)
+                        continue
 
-                    # 3. Dónde comprar
+                    # 4. Dónde comprar
                     elif btn_id.startswith('btn_buy_loc'):
                         supabase.table("users").update({"status": "waiting_buyer_location"}).eq("phone", chat_id).execute()
                         await reply_and_mirror(chat_id, "📍 ¿De qué Barrio o Ciudad sos?")
                     
-                    # 4. Menú / Taller
+                    # 5. Menú / Taller
                     elif btn_id.startswith('btn_menu_mech'):
                         supabase.table("users").update({"status": "menu_mode"}).eq("phone", chat_id).execute()
                         try:
