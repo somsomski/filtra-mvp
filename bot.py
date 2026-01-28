@@ -74,6 +74,14 @@ def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict
     except Exception as e:
         print(f"[Analytics Error] {e}")
 
+async def log_user_event(phone: str, action: str, details: str):
+    """Logs critical business events to Supabase 'logs' table."""
+    try:
+        data = {"user_id": phone, "action": action, "details": details}
+        supabase.table("logs").insert(data).execute()
+    except Exception as e:
+        print(f"Log Error: {e}")
+
 async def update_user_metadata(phone: str, updates: dict):
     if not supabase: return
     try:
@@ -298,10 +306,14 @@ async def process_search_request(chat_id: str, text_body: str, status: str):
                 await reply_and_mirror(chat_id, "✅ Gracias. Mensaje recibido, lo revisaremos.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
                 supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
             else:
-                reply = f"🤔 No encontré '{text_body}'.\n💡 Consejo: Probá 'Gol 1.6' o 'Hilux 2015'."
+                # Log Empty
+                await log_user_event(chat_id, "search_empty", text_body)
+
+                reply = f"🤔 No encontré '{text_body}' en la base.\n\nComo estamos en Beta, es posible que falte ese modelo. ¿Querés que lo agregue a la lista de prioridades?"
                 buttons = [
-                    {"id": "btn_human_help", "title": "🙋‍♂️ Ayuda / Error"},
-                    {"id": "btn_search_error", "title": "🔙 Probar de nuevo"}
+                    {"id": f"btn_add_missing_{text_body[:20]}", "title": "➕ Sumar a la base"},
+                    {"id": "btn_human_help", "title": "💬 Hablar con alguien"},
+                    {"id": "btn_search_retry", "title": "🔙 Probar de nuevo"}
                 ]
                 await reply_and_mirror(chat_id, reply, buttons=buttons)
         
@@ -406,6 +418,9 @@ async def process_search_request(chat_id: str, text_body: str, status: str):
                 list_rows=list_rows,
                 list_title="Motores"
             )
+            
+            # Log Success
+            await log_user_event(chat_id, "search_found", text_body)
 
     except Exception as e:
         print(f"Process Search Error: {e}")
@@ -637,6 +652,9 @@ async def webhook(payload: MetaWebhookPayload):
                         "name": input_val
                     }).eq("phone", chat_id).execute()
                     
+                    # Log Event
+                    await log_user_event(chat_id, "lead_mechanic", f"Shop: {input_val}")
+
                     await telegram_crm.update_topic_title(chat_id, 'bot', 'mechanic')
                     await telegram_crm.send_log_to_admin(chat_id, f"👨‍🔧 Mechanic Registered: {input_val}", priority='high')
                     
@@ -686,6 +704,10 @@ async def webhook(payload: MetaWebhookPayload):
                     await update_user_metadata(chat_id, {"logistics": logistics_val})
                     # Finalize
                     supabase.table("users").update({"status": "bot", "user_type": "seller"}).eq("phone", chat_id).execute()
+                    
+                    # Log Event
+                    await log_user_event(chat_id, "lead_seller", f"Logistics: {logistics_val}")
+
                     await telegram_crm.update_topic_title(chat_id, 'bot', 'seller')
                     await telegram_crm.send_log_to_admin(chat_id, f"🏪 Seller Registered: {logistics_val}", priority='high')
                     
@@ -727,6 +749,9 @@ async def webhook(payload: MetaWebhookPayload):
                         await telegram_crm.send_log_to_admin(chat_id, f"🔥 Buyer Urgency: {input_val}", priority='high')
                     else:
                         await telegram_crm.send_log_to_admin(chat_id, f"💸 Buyer Inquiry: {input_val}", priority='normal')
+                    
+                    # Log Event
+                    await log_user_event(chat_id, "lead_buyer", f"Urgency: {input_val}")
 
                     await reply_and_mirror(chat_id, f"{tag} **¡Pedido Recibido!**\n\nComo estamos en **Fase Beta**, un especialista de nuestra red revisará tu pedido manualmente y te contactará con opciones reales en breve.\n\n🏎️ ¡Gracias por ayudarnos a mejorar!", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
                     continue
@@ -769,6 +794,37 @@ async def webhook(payload: MetaWebhookPayload):
                         
                         # Treat as text search
                         await process_search_request(chat_id, new_query, status)
+                        continue
+                
+                # C. General Button Handlers
+                elif msg_type == 'interactive' and msg['interactive']['type'] == 'button_reply':
+                    btn_id = msg['interactive']['button_reply']['id']
+
+                    # 1. Add Missing
+                    if btn_id.startswith("btn_add_missing_"):
+                        model_name = btn_id.split("btn_add_missing_")[1]
+                        
+                        await log_user_event(chat_id, "request_missing", model_name)
+                        await telegram_crm.send_log_to_admin(chat_id, f"📝 Request to ADD: {model_name}", priority='normal')
+                        
+                        await reply_and_mirror(chat_id, f"📝 ¡Anotado!\n\nYa le avisé al equipo. Voy a buscar los filtros de {model_name} y los cargo lo antes posible. ¡Gracias! 🚀")
+                        await send_whatsapp_message(chat_id, SHORT_WELCOME)
+                        continue
+
+                    # 2. Human Help
+                    elif btn_id == "btn_human_help":
+                        supabase.table("users").update({"status": "human"}).eq("phone", chat_id).execute()
+                        await telegram_crm.update_topic_title(chat_id, 'human', user.get('user_type', 'unknown'))
+                        
+                        await log_user_event(chat_id, "human_mode_req", "User requested support")
+                        await telegram_crm.send_log_to_admin(chat_id, "👤 User requested HUMAN support.", priority='high')
+                        
+                        await reply_and_mirror(chat_id, "👤 Modo Humano activado.\n\nDejanos tu consulta escrita acá abajo 👇 y te responderemos en cuanto estemos online.", buttons=[{"id": "btn_return_bot", "title": "🤖 Volver al Bot"}])
+                        continue
+
+                    # 3. Retry Search
+                    elif btn_id == "btn_search_retry":
+                        await send_whatsapp_message(chat_id, SHORT_WELCOME)
                         continue
 
                     # Fetch Vehicle
