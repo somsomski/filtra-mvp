@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import Message, ForumTopic, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
-from supabase import create_client, Client
+from supabase import AsyncClient
 from services.whatsapp import send_whatsapp_message, send_interactive_buttons
 
 # Environment Variables
@@ -16,9 +16,9 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 # Initialize Supabase
-supabase: Client = None
-if SUPABASE_URL and SUPABASE_KEY:
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: AsyncClient = None
+# Initialization will happen in bot.py logic or explicitly
+
 
 # Initialize Router
 admin_router = Router()
@@ -77,7 +77,7 @@ async def get_or_create_topic(phone: str, user_name: str = "Unknown") -> int:
 
     try:
         # 1. Check DB
-        res = supabase.table("users").select("telegram_topic_id").eq("phone", phone).maybe_single().execute()
+        res = await supabase.table("users").select("telegram_topic_id").eq("phone", phone).maybe_single().execute()
         if res and res.data and res.data.get("telegram_topic_id"):
             return int(res.data["telegram_topic_id"])
         
@@ -111,7 +111,8 @@ async def get_or_create_topic(phone: str, user_name: str = "Unknown") -> int:
             "status": "bot", # Default
             "last_active_at": "now()"
         }
-        supabase.table("users").upsert(user_data).execute()
+        await supabase.table("users").upsert(user_data).execute()
+
         
         return topic_id
 
@@ -129,7 +130,7 @@ async def update_topic_title(phone: str, new_status: str, user_type: str):
 
     try:
         # Get topic_id and name from DB
-        res = supabase.table("users").select("telegram_topic_id, name").eq("phone", phone).maybe_single().execute()
+        res = await supabase.table("users").select("telegram_topic_id, name").eq("phone", phone).maybe_single().execute()
         if not res or not res.data:
             return
 
@@ -262,7 +263,7 @@ async def handle_admin_reply(message: Message):
 
     try:
         # Find user by topic_id
-        res = supabase.table("users").select("*").eq("telegram_topic_id", topic_id).maybe_single().execute()
+        res = await supabase.table("users").select("*").eq("telegram_topic_id", topic_id).maybe_single().execute()
         user = res.data if res else None
         
         if not user:
@@ -273,7 +274,7 @@ async def handle_admin_reply(message: Message):
 
         # Send to WhatsApp
         if current_status != 'human':
-             supabase.table("users").update({"status": "human"}).eq("phone", phone).execute()
+             await supabase.table("users").update({"status": "human"}).eq("phone", phone).execute()
              
              # Create task to update title (non-blocking ideally, but await here is fine)
              # Assumption: user_type unknown if not in DB, but we pass unknown. 
@@ -283,11 +284,11 @@ async def handle_admin_reply(message: Message):
         # Try to send as interactive button message (cleanest UX)
         try:
              exit_btn = [{"id": "btn_return_bot", "title": "🤖 Volver al Bot"}]
-             send_interactive_buttons(phone, text, exit_btn)
+             await send_interactive_buttons(phone, text, exit_btn)
         except Exception as e:
              # Fallback
              print(f"Fallback to text: {e}")
-             send_whatsapp_message(phone, text)
+             await send_whatsapp_message(phone, text)
 
     except Exception as e:
         print(f"[Telegram Reply Error] {e}")
@@ -303,7 +304,7 @@ async def on_resolve_click(callback: CallbackQuery):
         
         # Update DB
         if supabase:
-            supabase.table("users").update({"status": "bot"}).eq("phone", phone).execute()
+            await supabase.table("users").update({"status": "bot"}).eq("phone", phone).execute()
         
         # Update Title
         await update_topic_title(phone, "bot", "unknown")
@@ -337,7 +338,7 @@ async def cmd_new_lead(message: Message):
         await message.reply(f"Topic creado/encontrado: {topic_id}")
         
         welcome_msg = f"Hola {name}! 👋 Gracias por contactarnos via FiltraBot."
-        send_whatsapp_message(phone, welcome_msg)
+        await send_whatsapp_message(phone, welcome_msg)
         
         # Alert admin in topic
         await send_log_to_admin(phone, "Outreach iniciado por Admin.", priority='log')

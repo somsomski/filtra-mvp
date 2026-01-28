@@ -1,5 +1,5 @@
 import os
-import requests
+import httpx
 from typing import List, Dict
 
 # Environment Variables
@@ -40,7 +40,7 @@ def sanitize_argentina_number(phone_number: str) -> str:
                 
     return phone
 
-def send_whatsapp_message(to_number: str, text: str):
+async def send_whatsapp_message(to_number: str, text: str):
     """Sends a standard text message."""
     if not META_TOKEN or not PHONE_NUMBER_ID:
         print("Error: Meta credentials not set.")
@@ -58,13 +58,13 @@ def send_whatsapp_message(to_number: str, text: str):
     }
     
     try:
-        requests.post(url, json=payload, headers=headers).raise_for_status()
-    except requests.exceptions.RequestException as e:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+    except httpx.HTTPError as e:
         print(f"Error sending Text to {normalized_to}: {e}")
-        if e.response is not None:
-             print(f"Meta details: {e.response.text}")
 
-def send_interactive_list(to_number: str, body_text: str, button_text: str, section_title: str, rows: List[Dict]):
+async def send_interactive_list(to_number: str, body_text: str, button_text: str, section_title: str, rows: List[Dict]):
     """
     Sends an Interactive List Message.
     """
@@ -95,11 +95,13 @@ def send_interactive_list(to_number: str, body_text: str, button_text: str, sect
     }
     
     try:
-        requests.post(url, json=payload, headers=headers).raise_for_status()
-    except requests.exceptions.RequestException as e:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+    except httpx.HTTPError as e:
         print(f"Error sending List to {normalized_to}: {e}")
 
-def send_interactive_buttons(to_number: str, body_text: str, buttons: List[Dict]):
+async def send_interactive_buttons(to_number: str, body_text: str, buttons: List[Dict]):
     """
     Sends an Interactive Button Message.
     """
@@ -134,6 +136,8 @@ def send_interactive_buttons(to_number: str, body_text: str, buttons: List[Dict]
     }
     
     try:
-        requests.post(url, json=payload, headers=headers).raise_for_status()
-    except requests.exceptions.RequestException as e:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+    except httpx.HTTPError as e:
         print(f"Error sending Buttons to {normalized_to}: {e}")

@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from collections import deque
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
-from supabase import create_client, Client
+from supabase import AsyncClient, create_async_client
 
 # Services
 from services.whatsapp import send_whatsapp_message, send_interactive_list, send_interactive_buttons, sanitize_argentina_number
@@ -21,11 +21,10 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN")
 
 # Initialize Supabase Client
+supabase: AsyncClient = None
+
 if not SUPABASE_URL or not SUPABASE_KEY:
     print("WARNING: Supabase credentials missing services will fail.")
-    supabase = None
-else:
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 WELCOME_TEXT = (
     "👋 **¡Hola! Soy FiltraBot (Beta).** 🇦🇷\n\n"
@@ -45,7 +44,16 @@ PROCESSED_MSG_IDS = deque(maxlen=1000)
 async def lifespan(app: FastAPI):
     # Startup
     print("Starting Telegram Bot Polling...")
+    
+    # Init Supabase
+    global supabase
+    if SUPABASE_URL and SUPABASE_KEY:
+        supabase = await create_async_client(SUPABASE_URL, SUPABASE_KEY)
+    
     bot, dp = await telegram_crm.start_telegram()
+    # Share Supabase client with services
+    telegram_crm.supabase = supabase
+
     
     # Run polling in background
     # We use asyncio.create_task to run it without blocking FastAPI
@@ -66,7 +74,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # --- Analytics Helper (Updated) ---
-def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict] = None):
+async def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict] = None):
     if not supabase: return
     try:
         data = {
@@ -75,7 +83,7 @@ def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict
             "content": content,
             "raw_message": payload if payload else None
         }
-        supabase.table("logs").insert(data).execute()
+        await supabase.table("logs").insert(data).execute()
     except Exception as e:
         print(f"[Analytics Error] {e}")
 
@@ -89,7 +97,7 @@ async def log_user_event(phone: str, action: str, details: str):
             "direction": "analytics",     # REQUIRED: Constraint in DB
             "status": "saved"             # REQUIRED: Constraint in DB
         }
-        supabase.table("logs").insert(data).execute()
+        await supabase.table("logs").insert(data).execute()
     except Exception as e:
         # Crucial: Print error but DO NOT crash the webhook
         print(f"🔴 LOG ERROR: {e}")
@@ -97,7 +105,7 @@ async def log_user_event(phone: str, action: str, details: str):
 async def update_user_metadata(phone: str, updates: dict):
     if not supabase: return
     try:
-        res = supabase.table("users").select("metadata").eq("phone", phone).maybe_single().execute()
+        res = await supabase.table("users").select("metadata").eq("phone", phone).maybe_single().execute()
         current = res.data.get("metadata") or {}
         # Ensure dict
         if isinstance(current, str):
@@ -105,7 +113,7 @@ async def update_user_metadata(phone: str, updates: dict):
              except: current = {}
         
         current.update(updates)
-        supabase.table("users").update({"metadata": current}).eq("phone", phone).execute()
+        await supabase.table("users").update({"metadata": current}).eq("phone", phone).execute()
     except Exception as e:
         print(f"[Metadata Error] {e}")
 
@@ -295,7 +303,7 @@ async def search_vehicle(query_data: dict, limit: int = 12):
             or_conditions = ",".join([f"{col}.imatch.{regex_pattern}" for col in target_cols])
             query = query.or_(or_conditions)
         
-    res = query.limit(limit).execute()
+    res = await query.limit(limit).execute()
     return res.data
 
 async def process_search_request(chat_id: str, text_body: str, status: str):
@@ -316,7 +324,7 @@ async def process_search_request(chat_id: str, text_body: str, status: str):
             if status == 'menu_mode':
                 await telegram_crm.send_log_to_admin(chat_id, f"📝 **Feedback:** {text_body}", priority='high')
                 await reply_and_mirror(chat_id, "✅ Gracias. Mensaje recibido, lo revisaremos.", buttons=[{"id": "btn_search_error", "title": "🔍 Buscar otro"}])
-                supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                await supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
             else:
                 # Log Empty
                 await log_user_event(chat_id, "search_empty", text_body)
@@ -436,7 +444,7 @@ async def process_search_request(chat_id: str, text_body: str, status: str):
 
     except Exception as e:
         print(f"Process Search Error: {e}")
-        send_whatsapp_message(chat_id, "⚠️ Error en motor de búsqueda.")
+        await send_whatsapp_message(chat_id, "⚠️ Error en motor de búsqueda.")
 
 # --- Helper for Context-Aware Navigation ---
 async def send_car_actions(phone: str, vehicle_id: str):
@@ -451,10 +459,10 @@ async def send_car_actions(phone: str, vehicle_id: str):
             return
 
         # Fetch minimal vehicle data for context
-        v_res = supabase.table("vehicle").select("brand_car, model").eq("vehicle_id", vehicle_id).single().execute()
+        v_res = await supabase.table("vehicle").select("brand_car, model").eq("vehicle_id", vehicle_id).single().execute()
         v = v_res.data
         if not v:
-            send_whatsapp_message(phone, "⚠️ Vehículo no encontrado.")
+            await send_whatsapp_message(phone, "⚠️ Vehículo no encontrado.")
             return
 
         text = f"🔙 Opciones para *{v.get('brand_car')} {v.get('model')}*:"
@@ -478,11 +486,11 @@ async def reply_and_mirror(phone: str, text: str, buttons: list = None, list_row
     try:
         # 1. Send to WhatsApp via services
         if buttons:
-            send_interactive_buttons(phone, text, buttons)
+            await send_interactive_buttons(phone, text, buttons)
         elif list_rows:
-            send_interactive_list(phone, text, "Ver Opciones", list_title or "Resultados", list_rows)
+            await send_interactive_list(phone, text, "Ver Opciones", list_title or "Resultados", list_rows)
         else:
-            send_whatsapp_message(phone, text)
+            await send_whatsapp_message(phone, text)
     except Exception as e:
         print(f"WhatsApp Send Error: {e}")
 
@@ -574,7 +582,7 @@ async def webhook(payload: MetaWebhookPayload):
             # 1. Get/Create User & Session Management
             if not supabase: continue
 
-            user_res = supabase.table("users").select("*").eq("phone", chat_id).maybe_single().execute()
+            user_res = await supabase.table("users").select("*").eq("phone", chat_id).maybe_single().execute()
             user = user_res.data if user_res else None
             
             now = datetime.now(timezone.utc)
@@ -588,7 +596,7 @@ async def webhook(payload: MetaWebhookPayload):
                     "user_type": "unknown",
                     "last_active_at": now.isoformat()
                 }
-                supabase.table("users").insert(user).execute()
+                await supabase.table("users").insert(user).execute()
                 # Also ensure topic exists just in case
                 await telegram_crm.get_or_create_topic(chat_id, user_name)
             else:
@@ -603,7 +611,7 @@ async def webhook(payload: MetaWebhookPayload):
                         last_active = datetime.fromisoformat(last_active_str.replace("Z", "+00:00"))
                         if (now - last_active) > timedelta(minutes=60):
                             # Reset to bot
-                            supabase.table("users").update({"status": "bot", "last_active_at": now.isoformat()}).eq("phone", chat_id).execute()
+                            await supabase.table("users").update({"status": "bot", "last_active_at": now.isoformat()}).eq("phone", chat_id).execute()
                             user['status'] = 'bot' # Update local var
                             # Log to CRM (Silent/Log priority, no user alert needed)
                             await telegram_crm.send_log_to_admin(chat_id, "ℹ️ Sesión expirada. Bot reactivado.", priority='log')
@@ -611,7 +619,7 @@ async def webhook(payload: MetaWebhookPayload):
                         print(f"Time check error: {e}")
 
                 # Update Last Active
-                supabase.table("users").update({"last_active_at": now.isoformat()}).eq("phone", chat_id).execute()
+                await supabase.table("users").update({"last_active_at": now.isoformat()}).eq("phone", chat_id).execute()
 
             # Refresh local status
             status = user.get('status', 'bot')
@@ -629,7 +637,7 @@ async def webhook(payload: MetaWebhookPayload):
                     if msg['interactive']['type'] == 'button_reply':
                         if msg['interactive']['button_reply']['id'] == 'btn_return_bot':
                             # SWITCH TO BOT
-                            supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                            await supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                             await reply_and_mirror(chat_id, WELCOME_TEXT)
                             await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot.", priority='log')
                             continue
@@ -639,7 +647,7 @@ async def webhook(payload: MetaWebhookPayload):
                 keywords = ["menu", "start", "bot", "volver", "inicio"]
                 if text_body and text_body.lower().strip() in keywords:
                     # Switch back to bot
-                    supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                    await supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                     await reply_and_mirror(chat_id, WELCOME_TEXT)
                     await telegram_crm.send_log_to_admin(chat_id, f"🔄 User detected keyword '{text_body}'. Bot Active.", priority='log')
                     # Stop processing
@@ -666,7 +674,7 @@ async def webhook(payload: MetaWebhookPayload):
             
             if (input_val.lower() in cancel_keywords) or is_cancel_btn:
                 # Reset to bot
-                supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                await supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                 await telegram_crm.send_log_to_admin(chat_id, "🚫 User cancelled survey.", priority='log')
                 await reply_and_mirror(chat_id, SHORT_WELCOME, buttons=[{"id": "btn_search_error", "title": "🔍 Buscar repuesto"}])
                 continue
@@ -677,7 +685,7 @@ async def webhook(payload: MetaWebhookPayload):
                     priority_val = 'speed' if 'velocidad' in input_val.lower() or 'rocket' in input_val.lower() else 'price'
                     await update_user_metadata(chat_id, {"priority": priority_val})
                     
-                    supabase.table("users").update({"status": "waiting_mechanic_name"}).eq("phone", chat_id).execute()
+                    await supabase.table("users").update({"status": "waiting_mechanic_name"}).eq("phone", chat_id).execute()
                     
                     # Ask Name WITH CANCEL
                     btns = [{"id": "btn_cancel_survey", "title": "🔙 Cancelar"}]
@@ -689,7 +697,7 @@ async def webhook(payload: MetaWebhookPayload):
                     await update_user_metadata(chat_id, {"shop_name": input_val})
                     
                     # Finalize & Update SQL Column 'name'
-                    supabase.table("users").update({
+                    await supabase.table("users").update({
                         "status": "bot", 
                         "user_type": "mechanic",
                         "name": input_val
@@ -710,7 +718,7 @@ async def webhook(payload: MetaWebhookPayload):
                     # Save Name
                     await update_user_metadata(chat_id, {"shop_name": input_val})
                     # Update SQL Column 'name', move to Location
-                    supabase.table("users").update({
+                    await supabase.table("users").update({
                         "status": "waiting_seller_location",
                         "name": input_val
                     }).eq("phone", chat_id).execute()
@@ -725,7 +733,7 @@ async def webhook(payload: MetaWebhookPayload):
                     await update_user_metadata(chat_id, {"location": input_val})
                     
                     # Update Location Column
-                    supabase.table("users").update({
+                    await supabase.table("users").update({
                         "status": "waiting_seller_logistics",
                         "location": input_val
                     }).eq("phone", chat_id).execute()
@@ -746,7 +754,7 @@ async def webhook(payload: MetaWebhookPayload):
                     
                     await update_user_metadata(chat_id, {"logistics": logistics_val})
                     # Finalize
-                    supabase.table("users").update({"status": "bot", "user_type": "seller"}).eq("phone", chat_id).execute()
+                    await supabase.table("users").update({"status": "bot", "user_type": "seller"}).eq("phone", chat_id).execute()
                     
                     # Log Event
                     await log_user_event(chat_id, "lead_seller", f"Logistics: {logistics_val}")
@@ -763,7 +771,7 @@ async def webhook(payload: MetaWebhookPayload):
                     # Save location to column AND metadata
                     await update_user_metadata(chat_id, {"location": input_val})
                     
-                    supabase.table("users").update({
+                    await supabase.table("users").update({
                         "location": input_val, 
                         "status": "waiting_buyer_urgency"
                     }).eq("phone", chat_id).execute()
@@ -783,7 +791,7 @@ async def webhook(payload: MetaWebhookPayload):
                     is_urgent = 'ya' in input_val.lower() or 'fuego' in input_val.lower() or '🔥' in input_val
                     
                     await update_user_metadata(chat_id, {"urgency": input_val})
-                    supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                    await supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                     
                     tag = "🔥" if is_urgent else "💸"
                     

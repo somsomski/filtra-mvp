@@ -3,6 +3,6 @@ supabase
 pandas
 fastapi
 uvicorn
-requests
+httpx
 pydantic
 aiogram
