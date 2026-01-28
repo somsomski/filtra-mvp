@@ -75,32 +75,27 @@ app = FastAPI(lifespan=lifespan)
 
 # --- Analytics Helper (Updated) ---
 async def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict] = None):
+    """
+    Unified logging function for analytics.
+    Maps everything to the strict 'logs' table schema.
+    """
     if not supabase: return
     try:
         data = {
             "phone_number": phone, 
             "action_type": action_type, 
-            "content": content,
-            "raw_message": payload if payload else None
+            "content": content[:200] if content else "", # Truncate for safety
+            "raw_message": payload if payload else None,
+            "direction": "analytics",
+            "status": "saved"
         }
         await supabase.table("logs").insert(data).execute()
     except Exception as e:
         print(f"[Analytics Error] {e}")
 
 async def log_user_event(phone: str, action: str, details: str):
-    """Logs events to Supabase using the STRICT schema to prevent crashes."""
-    try:
-        data = {
-            "phone_number": phone,        # FIX: Maps to 'phone_number' column
-            "action_type": action,        # FIX: Maps to 'action_type' column
-            "content": details[:200],     # FIX: Maps to 'content' column
-            "direction": "analytics",     # REQUIRED: Constraint in DB
-            "status": "saved"             # REQUIRED: Constraint in DB
-        }
-        await supabase.table("logs").insert(data).execute()
-    except Exception as e:
-        # Crucial: Print error but DO NOT crash the webhook
-        print(f"🔴 LOG ERROR: {e}")
+    """Wrapper for backward compatibility."""
+    await log_to_db(phone, action, details)
 
 async def update_user_metadata(phone: str, updates: dict):
     if not supabase: return
@@ -813,7 +808,14 @@ async def webhook(payload: MetaWebhookPayload):
                 # A. Search Logic (Text)
                 if msg_type == 'text':
                     text_body = msg['text']['body'].strip()
-                    await log_to_db(chat_id, 'search_text', text_body, payload=msg)
+                    
+                    # LOGGING LOGIC
+                    if status == 'menu_mode':
+                        # Feedback/Error Reporting
+                        await log_to_db(chat_id, 'user_feedback', text_body, payload=msg)
+                    else:
+                        # Standard Search
+                        await log_to_db(chat_id, 'search_text', text_body, payload=msg)
                     
                     # Sanitize for SQL/Supabase filter to prevent syntax errors
                     search_term = text_body.replace(',', '').replace('(', '').replace(')', '').replace("'", "")
@@ -974,6 +976,7 @@ async def webhook(payload: MetaWebhookPayload):
 
                     # START MECHANIC FLOW
                     elif btn_id == 'btn_is_mechanic':
+                        await log_user_event(chat_id, "funnel_start", "mechanic_registration")
                         await supabase.table("users").update({"status": "waiting_mechanic_priority"}).eq("phone", chat_id).execute()
                         btns = [
                             {"id": "btn_prio_speed", "title": "🚀 Velocidad"},
@@ -984,6 +987,7 @@ async def webhook(payload: MetaWebhookPayload):
 
                     # START SELLER FLOW
                     elif btn_id == 'btn_is_seller':
+                         await log_user_event(chat_id, "funnel_start", "seller_registration")
                          await supabase.table("users").update({"status": "waiting_seller_name"}).eq("phone", chat_id).execute()
                          # Ask Name (Step 1)
                          btns = [{"id": "btn_cancel_survey", "title": "🔙 Cancelar"}]
