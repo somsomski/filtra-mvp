@@ -35,10 +35,17 @@ def get_bot():
     if bot_instance:
         return bot_instance
     
-    if not TELEGRAM_BOT_TOKEN:
-        print("WARNING: TELEGRAM_BOT_TOKEN not set.")
-        return None
+    # If not already initialized, try to initialize it (Lazy Load)
+    if TELEGRAM_BOT_TOKEN:
+         # Note: This creates a NEW instance if one doesn't exist, preserving Singleton if global is updated.
+         # Ideally start_telegram should be the main entry, but for safety:
+         bot_instance = Bot(
+            token=TELEGRAM_BOT_TOKEN, 
+            default=DefaultBotProperties(parse_mode="Markdown")
+         )
+         return bot_instance
         
+    print("WARNING: TELEGRAM_BOT_TOKEN not set.")
     return None
 
 async def start_telegram():

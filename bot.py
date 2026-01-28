@@ -813,7 +813,7 @@ async def webhook(payload: MetaWebhookPayload):
                 # A. Search Logic (Text)
                 if msg_type == 'text':
                     text_body = msg['text']['body'].strip()
-                    log_to_db(chat_id, 'search_text', text_body, payload=msg)
+                    await log_to_db(chat_id, 'search_text', text_body, payload=msg)
                     
                     # Sanitize for SQL/Supabase filter to prevent syntax errors
                     search_term = text_body.replace(',', '').replace('(', '').replace(')', '').replace("'", "")
@@ -849,7 +849,7 @@ async def webhook(payload: MetaWebhookPayload):
                     
                     # --- VEHICLE DETAILS ---
                     # Fetch Vehicle
-                    v_res = supabase.table("vehicle").select("*").eq("vehicle_id", vid).single().execute()
+                    v_res = await supabase.table("vehicle").select("*").eq("vehicle_id", vid).single().execute()
                     vehicle = v_res.data
                     if not vehicle: continue
 
@@ -860,7 +860,7 @@ async def webhook(payload: MetaWebhookPayload):
                     await telegram_crm.send_log_to_admin(chat_id, f"👆 Seleccionó: {sel_brand} {sel_model} ({sel_year})", priority='log')
 
                     # Fetch Parts
-                    parts_res = supabase.table("vehicle_part").select("role, part(brand_filter, part_code, part_type)").eq("vehicle_id", vid).execute()
+                    parts_res = await supabase.table("vehicle_part").select("role, part(brand_filter, part_code, part_type)").eq("vehicle_id", vid).execute()
                     
                     # Build Message
                     display_title = f"{vehicle.get('brand_car')} {vehicle.get('model')}"
@@ -922,7 +922,7 @@ async def webhook(payload: MetaWebhookPayload):
 
                     # 2. Human Help (Global & Fallback)
                     elif btn_id == "btn_human_help":
-                        supabase.table("users").update({"status": "human"}).eq("phone", chat_id).execute()
+                        await supabase.table("users").update({"status": "human"}).eq("phone", chat_id).execute()
                         await telegram_crm.update_topic_title(chat_id, 'human', user.get('user_type', 'unknown'))
                         
                         await log_user_event(chat_id, "human_mode_req", "User requested support")
@@ -933,7 +933,7 @@ async def webhook(payload: MetaWebhookPayload):
 
                     # 2b. Return to Bot
                     elif btn_id == 'btn_return_bot':
-                         supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                         await supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                          await reply_and_mirror(chat_id, SHORT_WELCOME)
                          await telegram_crm.send_log_to_admin(chat_id, "🔄 User returned to Bot via Button.", priority='log')
 
@@ -941,17 +941,17 @@ async def webhook(payload: MetaWebhookPayload):
                     elif btn_id == "btn_search_retry" or btn_id == "btn_search_error":
                         await send_whatsapp_message(chat_id, SHORT_WELCOME)
                         # Reset status
-                        supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
+                        await supabase.table("users").update({"status": "bot"}).eq("phone", chat_id).execute()
                         continue
 
                     # 4. Dónde comprar
                     elif btn_id.startswith('btn_buy_loc'):
-                        supabase.table("users").update({"status": "waiting_buyer_location"}).eq("phone", chat_id).execute()
+                        await supabase.table("users").update({"status": "waiting_buyer_location"}).eq("phone", chat_id).execute()
                         await reply_and_mirror(chat_id, "📍 ¿De qué Barrio o Ciudad sos?")
                     
                     # 5. Menú / Taller
                     elif btn_id.startswith('btn_menu_mech'):
-                        supabase.table("users").update({"status": "menu_mode"}).eq("phone", chat_id).execute()
+                        await supabase.table("users").update({"status": "menu_mode"}).eq("phone", chat_id).execute()
                         try:
                             vid = btn_id.split('_')[-1]
                         except:
@@ -974,7 +974,7 @@ async def webhook(payload: MetaWebhookPayload):
 
                     # START MECHANIC FLOW
                     elif btn_id == 'btn_is_mechanic':
-                        supabase.table("users").update({"status": "waiting_mechanic_priority"}).eq("phone", chat_id).execute()
+                        await supabase.table("users").update({"status": "waiting_mechanic_priority"}).eq("phone", chat_id).execute()
                         btns = [
                             {"id": "btn_prio_speed", "title": "🚀 Velocidad"},
                             {"id": "btn_prio_price", "title": "💰 Precio"},
@@ -984,7 +984,7 @@ async def webhook(payload: MetaWebhookPayload):
 
                     # START SELLER FLOW
                     elif btn_id == 'btn_is_seller':
-                         supabase.table("users").update({"status": "waiting_seller_name"}).eq("phone", chat_id).execute()
+                         await supabase.table("users").update({"status": "waiting_seller_name"}).eq("phone", chat_id).execute()
                          # Ask Name (Step 1)
                          btns = [{"id": "btn_cancel_survey", "title": "🔙 Cancelar"}]
                          await reply_and_mirror(chat_id, "🏪 Alta de Vendedor: ¿Cómo se llama tu Negocio/Repuestera?", buttons=btns)
