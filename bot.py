@@ -531,6 +531,20 @@ async def webhook(payload: MetaWebhookPayload):
         for change in entry.get('changes', []):
             value = change.get('value', {})
             
+            # --- NEW: STALE FILTER ---
+            try:
+                if 'messages' in value:
+                    msg = value['messages'][0]
+                    raw_ts = msg.get('timestamp')
+                    if raw_ts:
+                        msg_dt = datetime.fromtimestamp(int(raw_ts), tz=timezone.utc)
+                        if (datetime.now(timezone.utc) - msg_dt).total_seconds() > 300:
+                            print(f"⌛ Ignoring STALE message from {msg_dt}")
+                            return JSONResponse(content={"status": "ignored_stale"}, status_code=200)
+            except Exception as e:
+                print(f"Time check error: {e}")
+            # -------------------------
+            
             # --- DEDUPLICATION ---
             try:
                 if 'messages' in value:
