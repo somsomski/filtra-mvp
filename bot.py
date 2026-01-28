@@ -5,6 +5,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Query, Response
+from fastapi.responses import JSONResponse
+from collections import deque
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from supabase import create_client, Client
@@ -34,6 +36,9 @@ WELCOME_TEXT = (
 )
 
 SHORT_WELCOME = "✅ Listo. Escribí el modelo (ej: *Gol 1.6* o *Hilux 2015*) para buscar."
+
+# Cache processed message IDs to prevent retry loops
+PROCESSED_MSG_IDS = deque(maxlen=1000)
 
 # --- Lifespan for Telegram Polling ---
 @asynccontextmanager
@@ -75,12 +80,19 @@ def log_to_db(phone: str, action_type: str, content: str, payload: Optional[Dict
         print(f"[Analytics Error] {e}")
 
 async def log_user_event(phone: str, action: str, details: str):
-    """Logs critical business events to Supabase 'logs' table."""
+    """Logs events to Supabase using the STRICT schema to prevent crashes."""
     try:
-        data = {"user_id": phone, "action": action, "details": details}
+        data = {
+            "phone_number": phone,        # FIX: Maps to 'phone_number' column
+            "action_type": action,        # FIX: Maps to 'action_type' column
+            "content": details[:200],     # FIX: Maps to 'content' column
+            "direction": "analytics",     # REQUIRED: Constraint in DB
+            "status": "saved"             # REQUIRED: Constraint in DB
+        }
         supabase.table("logs").insert(data).execute()
     except Exception as e:
-        print(f"Log Error: {e}")
+        # Crucial: Print error but DO NOT crash the webhook
+        print(f"🔴 LOG ERROR: {e}")
 
 async def update_user_metadata(phone: str, updates: dict):
     if not supabase: return
@@ -518,6 +530,23 @@ async def webhook(payload: MetaWebhookPayload):
     for entry in payload.entry:
         for change in entry.get('changes', []):
             value = change.get('value', {})
+            
+            # --- DEDUPLICATION ---
+            try:
+                if 'messages' in value:
+                    msg_id = value['messages'][0].get('id')
+                    
+                    # If ID was already processed, stop immediately (return 200 OK)
+                    if msg_id and msg_id in PROCESSED_MSG_IDS:
+                        print(f"🔁 Ignoring retry: {msg_id}")
+                        return JSONResponse(content={"status": "ignored_duplicate"}, status_code=200)
+                    
+                    if msg_id:
+                        PROCESSED_MSG_IDS.append(msg_id)
+            except Exception as e:
+                print(f"Dedup error: {e}")
+            # ---------------------
+
             messages = value.get('messages', [])
             
             if not messages:
